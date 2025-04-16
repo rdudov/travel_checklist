@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - Чек-лист</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .metadata {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .metadata p {
+            margin: 5px 0;
+            color: #666;
+        }
+        .category {
+            margin-bottom: 30px;
+        }
+        .category-title {
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 5px;
+            margin-bottom: 15px;
+        }
+        .checklist {
+            list-style: none;
+            padding: 0;
+        }
+        .checklist li {
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+        }
+        .checklist input[type="checkbox"] {
+            margin-right: 10px;
+            width: 18px;
+            height: 18px;
+        }
+        .checklist label {
+            cursor: pointer;
+            flex-grow: 1;
+        }
+        .checklist input[type="checkbox"]:checked + label {
+            text-decoration: line-through;
+            color: #7f8c8d;
+        }
+        .actions {
+            margin-top: 20px;
+            text-align: center;
+        }
+        .btn {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 0 5px;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .btn:hover {
+            background-color: #2980b9;
+        }
+        .progress {
+            margin-top: 20px;
+            text-align: center;
+            color: #7f8c8d;
+        }
+        @media print {
+            body {
+                background-color: white;
+                padding: 0;
+            }
+            .container {
+                box-shadow: none;
+                padding: 0;
+            }
+            .actions {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>{{ title }}</h1>
+        
+        <div class="metadata">
+            <p><strong>Место назначения:</strong> {{ destination }}</p>
+            <p><strong>Длительность:</strong> {{ duration }} дней</p>
+            <p><strong>Цель поездки:</strong> {{ purpose }}</p>
+            {% if weather %}
+            <p><strong>Погода:</strong> {{ weather }}</p>
+            {% endif %}
+        </div>
+
+        {% for category, items in categories.items() %}
+        <div class="category">
+            <h2 class="category-title">{{ category }}</h2>
+            <ul class="checklist">
+                {% for item in items %}
+                <li>
+                    <input type="checkbox" id="item-{{ loop.index }}" name="item-{{ loop.index }}">
+                    <label for="item-{{ loop.index }}">{{ item }}</label>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endfor %}
+
+        <div class="progress">
+            <span id="progress-text">0 из {{ total_items }} выполнено</span>
+        </div>
+
+        <div class="actions">
+            <button class="btn" onclick="window.print()">🖨️ Распечатать</button>
+            <button class="btn" onclick="copyToClipboard()">📋 Копировать</button>
+            <a href="{{ share_url }}" class="btn" target="_blank">📤 Поделиться</a>
+        </div>
+    </div>
+
+    <script>
+        // Update progress when checkboxes are clicked
+        document.querySelectorAll('input[type="checkbox"]').forEach(checkbox => {
+            checkbox.addEventListener('change', updateProgress);
+        });
+
+        function updateProgress() {
+            const total = document.querySelectorAll('input[type="checkbox"]').length;
+            const checked = document.querySelectorAll('input[type="checkbox"]:checked').length;
+            document.getElementById('progress-text').textContent = `${checked} из ${total} выполнено`;
+        }
+
+        function copyToClipboard() {
+            let text = `${document.querySelector('h1').textContent}\n\n`;
+            
+            // Add metadata
+            const metadata = document.querySelector('.metadata').textContent.trim().split('\n');
+            metadata.forEach(line => text += line.trim() + '\n');
+            text += '\n';
+
+            // Add categories and items
+            document.querySelectorAll('.category').forEach(category => {
+                text += category.querySelector('.category-title').textContent + '\n';
+                category.querySelectorAll('.checklist li label').forEach(item => {
+                    text += `☐ ${item.textContent}\n`;
+                });
+                text += '\n';
+            });
+
+            navigator.clipboard.writeText(text).then(() => {
+                alert('Список скопирован в буфер обмена!');
+            }).catch(err => {
+                console.error('Ошибка при копировании: ', err);
+                alert('Не удалось скопировать список. Пожалуйста, попробуйте еще раз.');
+            });
+        }
+    </script>
+</body>
+</html> 
