@@ -17,8 +17,8 @@ Telegram бот для создания и управления чек-лист�
 
 1. Клонируйте репозиторий:
 ```bash
-git clone https://github.com/rdudov/travel_list.git
-cd travel_list
+git clone https://github.com/rdudov/travel_checklist.git
+cd travel_checklist
 ```
 
 2. Создайте виртуальное окружение и активируйте его:

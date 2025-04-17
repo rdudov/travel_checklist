@@ -17,7 +17,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine
 
 from models.base import Base
-from bot.handlers import ChecklistHandlers
+from handlers import ChecklistHandlers
 
 # Load environment variables
 load_dotenv()
