@@ -216,14 +216,14 @@ def main():
             WAITING_DESTINATION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_destination)
             ],
-            WAITING_TRIP_TYPE: [
-                CallbackQueryHandler(handlers.handle_trip_type, pattern="^trip_")
+            WAITING_START_DATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_start_date)
             ],
             WAITING_DURATION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_duration)
             ],
-            WAITING_START_DATE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_start_date)
+            WAITING_TRIP_TYPE: [
+                CallbackQueryHandler(handlers.handle_trip_type, pattern="^trip_")
             ],
         },
         fallbacks=[

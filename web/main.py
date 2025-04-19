@@ -61,6 +61,42 @@ async def view_checklist(request: Request, checklist_id: int):
         # Access trip_metadata instead of metadata and handle the case when it's None
         trip_metadata = checklist.trip_metadata or {}
         
+        # Format weather information in a user-friendly way
+        weather_info = ""
+        if 'aggregated_weather' in trip_metadata and trip_metadata['aggregated_weather']:
+            weather = trip_metadata['aggregated_weather']
+            
+            # Day temperature range
+            if weather.get('day_temp_range'):
+                weather_info += f"Днем: от {weather['day_temp_range'][0]}°C до {weather['day_temp_range'][1]}°C. "
+                
+            # Night temperature range
+            if weather.get('night_temp_range'):
+                weather_info += f"Ночью: от {weather['night_temp_range'][0]}°C до {weather['night_temp_range'][1]}°C. "
+                
+            # Weather description
+            if weather.get('descriptions'):
+                weather_info += f"Погода: {', '.join(weather['descriptions'])}. "
+                
+            # Wind information
+            if weather.get('avg_wind'):
+                weather_info += f"Ветер: в среднем {weather['avg_wind']} м/с"
+                if weather.get('max_wind'):
+                    weather_info += f", максимум до {weather['max_wind']} м/с. "
+                else:
+                    weather_info += ". "
+                
+            # Precipitation information
+            if weather.get('avg_precip'):
+                weather_info += f"Осадки: в среднем {weather['avg_precip']} мм/день"
+                if weather.get('total_precip'):
+                    weather_info += f", всего до {weather['total_precip']} мм за период."
+                else:
+                    weather_info += "."
+        elif 'weather' in trip_metadata and trip_metadata['weather']:
+            # Use raw weather data if aggregated is not available
+            weather_info = "Подробная информация о погоде доступна в боте."
+        
         return templates.TemplateResponse(
             "checklist.html",
             {
@@ -69,7 +105,7 @@ async def view_checklist(request: Request, checklist_id: int):
                 "destination": trip_metadata.get("destination", "Не указано"),
                 "duration": trip_metadata.get("duration", "Не указано"),
                 "purpose": trip_metadata.get("trip_type", "Не указано"),
-                "weather": trip_metadata.get("weather", None),
+                "weather": weather_info,
                 "categories": categories,
                 "total_items": total_items,
                 "share_url": share_url
