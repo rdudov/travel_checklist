@@ -23,7 +23,7 @@ class Checklist(BaseModel):
     type = Column(String, index=True)  # 'travel', 'shopping', 'repair', etc.
     is_template = Column(Boolean, default=False)
     is_public = Column(Boolean, default=False)
-    metadata = Column(JSON, nullable=True)  # For travel: destination, weather, duration, etc.
+    trip_metadata = Column(JSON, nullable=True)  # For travel: destination, weather, duration, etc.
     
     owner_id = Column(Integer, ForeignKey("users.id"))
     owner = relationship("User", back_populates="checklists")
