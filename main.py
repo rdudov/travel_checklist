@@ -20,7 +20,7 @@ from sqlalchemy import create_engine
 
 from models.base import Base
 from handlers import ChecklistHandlers
-from constants import WAITING_DESTINATION, WAITING_TRIP_TYPE, WAITING_DURATION, WAITING_START_DATE
+from constants import WAITING_DESTINATION, WAITING_TRIP_TYPE, WAITING_DURATION, WAITING_START_DATE, WAITING_NEW_ITEM_NAME
 
 # Load environment variables
 load_dotenv()
@@ -168,6 +168,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("view_"):
         checklist_id = int(query.data.split("_")[1])
         await handlers.view_checklist(update, context, checklist_id)
+    elif query.data.startswith("category_"):
+        await handlers.handle_category_selection(update, context)
+    elif query.data.startswith("add_item_"):
+        await handlers.handle_add_item(update, context)
+    elif query.data.startswith("add_to_category_"):
+        await handlers.handle_add_to_category(update, context)
+    elif query.data.startswith("delete_item_"):
+        await handlers.handle_delete_item(update, context)
     else:
         module_logger.warning("Unknown callback data", 
                     extra={"user_interaction": True, "callback_data": query.data})
@@ -207,7 +215,7 @@ def main():
     handlers = ChecklistHandlers(Session())
 
     # Add conversation handler for new trip creation
-    conv_handler = ConversationHandler(
+    trip_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("newtrip", new_trip),
             CallbackQueryHandler(new_trip, pattern="^new_trip$")
@@ -234,12 +242,31 @@ def main():
         ],
         name="trip_conversation",
     )
+    
+    # Add conversation handler for item editing
+    edit_item_conv_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(handlers.handle_add_to_category, pattern="^add_to_category_")
+        ],
+        states={
+            WAITING_NEW_ITEM_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_new_item_name)
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("start", start),
+            CallbackQueryHandler(button_handler, pattern="^edit_"),
+        ],
+        name="edit_item_conversation",
+    )
 
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("mylists", my_lists_command))
-    application.add_handler(conv_handler)
+    application.add_handler(trip_conv_handler)
+    application.add_handler(edit_item_conv_handler)
     application.add_handler(CallbackQueryHandler(button_handler))
     
     # Add error handler

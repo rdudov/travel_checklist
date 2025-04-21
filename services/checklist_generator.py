@@ -1,19 +1,120 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from .weather import WeatherService
+from .llm_client import LLMClient
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ChecklistGenerator:
     """Service for generating checklists based on various parameters"""
     
     def __init__(self):
         self.weather_service = WeatherService()
+        self.llm_client = LLMClient()
         
-    async def generate_travel_checklist(self, destination: str, duration: int, purpose: str) -> Dict[str, Any]:
-        """Generate a travel checklist based on destination, duration and purpose"""
-        # Get weather forecast
+    async def generate_travel_checklist(self, 
+                                      destination: str, 
+                                      purpose: str, 
+                                      duration: int, 
+                                      start_date: Optional[str] = None,
+                                      weather_info: Optional[Dict] = None,
+                                      user_id: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Generate a travel checklist based on destination, duration, purpose and other factors
+        
+        Args:
+            destination: Place of travel
+            purpose: Purpose of travel (business, beach, active, etc.)
+            duration: Duration in days
+            start_date: Start date in DD.MM.YYYY format (optional)
+            weather_info: Weather forecast information (optional, will be fetched if not provided)
+            user_id: User ID for personalization based on previous lists (optional)
+        
+        Returns:
+            Dictionary with checklist data
+        """
+        # Get weather forecast if not provided
+        if not weather_info:
+            try:
+                weather_info = await self.weather_service.get_weather_forecast(destination)
+            except Exception as e:
+                logger.error(f"Error getting weather forecast: {str(e)}")
+                weather_info = {}
+        
+        # Try to get previous user lists for personalization
+        previous_lists = []
+        if user_id:
+            try:
+                from models.checklist import User, Checklist
+                from sqlalchemy import create_engine
+                from sqlalchemy.orm import sessionmaker
+                import os
+                
+                # Create a temporary database session
+                engine = create_engine(os.getenv('DATABASE_URL'))
+                Session = sessionmaker(bind=engine)
+                session = Session()
+                
+                # Get user's previous lists
+                user = session.query(User).filter_by(telegram_id=user_id).first()
+                if user:
+                    # Get up to 3 most recent checklists for this user
+                    checklists = session.query(Checklist).filter_by(owner_id=user.id).order_by(Checklist.created_at.desc()).limit(3).all()
+                    
+                    for checklist in checklists:
+                        if checklist.trip_metadata:
+                            # Convert database checklist to format needed for LLM
+                            items_by_category = {}
+                            for item in checklist.items:
+                                category = item.category or "Прочее"
+                                if category not in items_by_category:
+                                    items_by_category[category] = []
+                                items_by_category[category].append(item.title)
+                            
+                            previous_lists.append({
+                                'destination': checklist.trip_metadata.get('destination', ''),
+                                'purpose': checklist.trip_metadata.get('trip_type', ''),
+                                'duration': checklist.trip_metadata.get('duration', 0),
+                                'items': items_by_category
+                            })
+                
+                session.close()
+            except Exception as e:
+                logger.error(f"Error getting previous user lists: {str(e)}")
+        
+        # Try to generate checklist with LLM first
         try:
-            forecast = await self.weather_service.get_weather_forecast(destination)
-            weather_items = self.weather_service.get_packing_suggestions(forecast)
+            llm_result = await self.llm_client.generate_checklist(
+                destination=destination,
+                purpose=purpose,
+                duration=duration,
+                start_date=start_date or "",
+                weather_info=weather_info,
+                previous_lists=previous_lists
+            )
+            
+            if "error" not in llm_result:
+                # LLM generated a valid checklist
+                return {
+                    "destination": destination,
+                    "duration": duration,
+                    "purpose": purpose,
+                    "categories": llm_result.get("categories", {}),
+                    "generated_by": "llm"
+                }
         except Exception as e:
+            logger.error(f"Error generating checklist with LLM: {str(e)}")
+        
+        # Fallback to rule-based generation if LLM fails
+        logger.info("Falling back to rule-based checklist generation")
+        
+        # Get weather-based items
+        try:
+            weather_items = []
+            if weather_info:
+                weather_items = self.weather_service.get_packing_suggestions(weather_info)
+        except Exception as e:
+            logger.error(f"Error getting weather suggestions: {str(e)}")
             weather_items = self._get_basic_travel_items()
         
         # Get purpose-specific items
@@ -29,7 +130,8 @@ class ChecklistGenerator:
             "destination": destination,
             "duration": duration,
             "purpose": purpose,
-            "categories": self._categorize_items(all_items)
+            "categories": self._categorize_items(all_items),
+            "generated_by": "rules"
         }
     
     def _get_basic_travel_items(self) -> List[str]:
@@ -67,7 +169,7 @@ class ChecklistGenerator:
                 "Шлепанцы",
                 "Пляжная сумка"
             ],
-            "hiking": [
+            "active": [
                 "Треккинговая обувь",
                 "Рюкзак",
                 "Фляжка для воды",
@@ -76,7 +178,7 @@ class ChecklistGenerator:
                 "Походная аптечка",
                 "Фонарик"
             ],
-            "city": [
+            "other": [
                 "Удобная обувь для прогулок",
                 "Фотоаппарат",
                 "Путеводитель",

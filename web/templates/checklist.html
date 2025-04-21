@@ -84,6 +84,12 @@
         .btn:hover {
             background-color: #2980b9;
         }
+        .btn-primary {
+            background-color: #2ecc71;
+        }
+        .btn-primary:hover {
+            background-color: #27ae60;
+        }
         .progress {
             margin-top: 20px;
             text-align: center;
@@ -136,6 +142,7 @@
         </div>
 
         <div class="actions">
+            <a href="/edit/{{ request.path_params.checklist_id }}" class="btn btn-primary">✏️ Редактировать</a>
             <button class="btn" onclick="window.print()">🖨️ Распечатать</button>
             <button class="btn" onclick="copyToClipboard()">📋 Копировать</button>
             <a href="{{ share_url }}" class="btn" target="_blank">📤 Поделиться</a>

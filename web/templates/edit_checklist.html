@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Редактирование: {{ title }}</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .metadata {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .metadata p {
+            margin: 5px 0;
+            color: #666;
+        }
+        .category {
+            margin-bottom: 30px;
+        }
+        .category-title {
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 5px;
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .checklist {
+            list-style: none;
+            padding: 0;
+        }
+        .checklist li {
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            position: relative;
+        }
+        .checklist .item-text {
+            flex-grow: 1;
+            padding: 8px;
+            margin-right: 40px;
+        }
+        .delete-item {
+            color: #e74c3c;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 1.2em;
+            position: absolute;
+            right: 0;
+            padding: 5px;
+        }
+        .delete-item:hover {
+            color: #c0392b;
+        }
+        .actions {
+            margin-top: 20px;
+            text-align: center;
+        }
+        .btn {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 0 5px 10px 5px;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .btn-danger {
+            background-color: #e74c3c;
+        }
+        .btn-danger:hover {
+            background-color: #c0392b;
+        }
+        .btn-success {
+            background-color: #2ecc71;
+        }
+        .btn-success:hover {
+            background-color: #27ae60;
+        }
+        .btn:hover {
+            background-color: #2980b9;
+        }
+        .new-item-form {
+            margin-top: 15px;
+            display: flex;
+            align-items: center;
+        }
+        .new-item-input {
+            flex-grow: 1;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin-right: 10px;
+        }
+        .btn-small {
+            padding: 8px 15px;
+            font-size: 0.9em;
+        }
+        .add-category-form {
+            margin-bottom: 30px;
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            display: flex;
+            align-items: center;
+        }
+        .add-category-form input {
+            flex-grow: 1;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin-right: 10px;
+        }
+        .notification {
+            padding: 10px;
+            margin-bottom: 15px;
+            border-radius: 5px;
+            text-align: center;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Редактирование: {{ title }}</h1>
+        
+        <div class="metadata">
+            <p><strong>Место назначения:</strong> {{ destination }}</p>
+            <p><strong>Длительность:</strong> {{ duration }} дней</p>
+            <p><strong>Цель поездки:</strong> {{ purpose }}</p>
+            {% if weather %}
+            <p><strong>Погода:</strong> {{ weather }}</p>
+            {% endif %}
+        </div>
+
+        {% if notification %}
+        <div class="notification {% if notification_type %}{{ notification_type }}{% endif %}">
+            {{ notification }}
+        </div>
+        {% endif %}
+
+        <!-- Add new category form -->
+        <div class="add-category-form">
+            <form action="/edit/{{ checklist_id }}/add-category" method="post">
+                <input type="text" name="category_name" placeholder="Название новой категории" required>
+                <button type="submit" class="btn btn-success btn-small">Добавить категорию</button>
+            </form>
+        </div>
+
+        {% for category, items in categories.items() %}
+        <div class="category">
+            <h2 class="category-title">
+                {{ category }}
+                <form action="/edit/{{ checklist_id }}/delete-category" method="post" style="display:inline;" onsubmit="return confirm('Удалить категорию {{ category }} и все элементы в ней?');">
+                    <input type="hidden" name="category_name" value="{{ category }}">
+                    <button type="submit" class="delete-item">🗑️</button>
+                </form>
+            </h2>
+            <ul class="checklist">
+                {% for item in items %}
+                <li>
+                    <span class="item-text">{{ item.title }}</span>
+                    <form action="/edit/{{ checklist_id }}/delete-item" method="post" style="display:inline;">
+                        <input type="hidden" name="item_id" value="{{ item.id }}">
+                        <button type="submit" class="delete-item">🗑️</button>
+                    </form>
+                </li>
+                {% endfor %}
+            </ul>
+            
+            <!-- Add new item form for this category -->
+            <form action="/edit/{{ checklist_id }}/add-item" method="post" class="new-item-form">
+                <input type="text" name="item_name" class="new-item-input" placeholder="Новый элемент" required>
+                <input type="hidden" name="category" value="{{ category }}">
+                <button type="submit" class="btn btn-success btn-small">Добавить</button>
+            </form>
+        </div>
+        {% endfor %}
+
+        <div class="actions">
+            <a href="/checklist/{{ checklist_id }}" class="btn">👁️ Просмотр списка</a>
+            <a href="https://t.me/travel_list_bot" class="btn">🤖 Открыть в Telegram</a>
+        </div>
+    </div>
+
+    <script>
+        // Highlight notification for a short period
+        document.addEventListener('DOMContentLoaded', function() {
+            const notification = document.querySelector('.notification');
+            if (notification) {
+                setTimeout(() => {
+                    notification.style.opacity = '0.7';
+                    notification.style.transition = 'opacity 0.5s ease-out';
+                }, 3000);
+                setTimeout(() => {
+                    notification.style.display = 'none';
+                }, 3500);
+            }
+        });
+    </script>
+</body>
+</html> 

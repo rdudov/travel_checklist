@@ -9,7 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
 # Import states from constants.py
-from constants import WAITING_DESTINATION, WAITING_START_DATE, WAITING_DURATION, WAITING_TRIP_TYPE
+from constants import WAITING_DESTINATION, WAITING_START_DATE, WAITING_DURATION, WAITING_TRIP_TYPE, WAITING_NEW_ITEM_NAME
 
 from models.checklist import User, Checklist, ChecklistItem
 from services.weather import WeatherService
@@ -327,26 +327,36 @@ class ChecklistHandlers:
             "start_date": context.user_data['start_date']
         })
         
-        checklist = await self.checklist_generator.generate_travel_checklist(
-            destination=context.user_data['destination'],
-            purpose=context.user_data['trip_type'],
-            duration=context.user_data['duration'],
+        # Отправим сообщение о том, что генерируем список
+        progress_message = await query.message.reply_text(
+            "🔄 Генерирую список вещей для вашей поездки...\n"
+            "Это может занять несколько секунд."
         )
         
-        # Save checklist to database
-        user = self.session.query(User).filter_by(
+        # Получаем пользователя из базы данных или создаем нового
+        user_db = self.session.query(User).filter_by(
             telegram_id=update.effective_user.id
         ).first()
         
-        if not user:
-            user = User(
+        if not user_db:
+            user_db = User(
                 telegram_id=update.effective_user.id,
                 username=update.effective_user.username,
                 first_name=update.effective_user.first_name,
                 last_name=update.effective_user.last_name
             )
-            self.session.add(user)
+            self.session.add(user_db)
             self.session.commit()
+        
+        # Generate checklist with LLM (now passing user ID for personalization)
+        checklist = await self.checklist_generator.generate_travel_checklist(
+            destination=context.user_data['destination'],
+            purpose=context.user_data['trip_type'],
+            duration=context.user_data['duration'],
+            start_date=context.user_data['start_date'],
+            weather_info=context.user_data.get('weather_info', {}),
+            user_id=user.id  # Pass user ID for personalization
+        )
         
         # Create a better title with date, time, purpose and duration
         creation_time = datetime.now().strftime("%H:%M")
@@ -364,15 +374,16 @@ class ChecklistHandlers:
                 'weather': context.user_data.get('weather_info', {}),
                 'aggregated_weather': context.user_data.get('aggregated_weather', {})
             },
-            owner_id=user.id
+            owner_id=user_db.id
         )
         self.session.add(db_checklist)
         self.session.commit()
         
         logger.info("Checklist saved", extra={
             "user_interaction": True,
-            "user_id": user.id,
-            "checklist_id": db_checklist.id
+            "user_id": user_db.id,
+            "checklist_id": db_checklist.id,
+            "generation_method": checklist.get("generated_by", "unknown")
         })
         
         # Convert categories from the generator to our item format
@@ -445,12 +456,14 @@ class ChecklistHandlers:
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
+        # Удаляем сообщение о прогрессе и отправляем результат
+        await progress_message.delete()
         await query.message.reply_text(message, reply_markup=reply_markup)
         
         # Clear user data and end conversation
         logger.info("Checklist creation completed", extra={
             "user_interaction": True,
-            "user_id": user.id,
+            "user_id": user_db.id,
             "checklist_id": db_checklist.id
         })
         context.user_data.clear()
@@ -635,20 +648,349 @@ class ChecklistHandlers:
             await query.message.reply_text("Список не найден или был удален.")
             return
         
-        # Placeholder for full edit functionality
-        message = (
-            "🔧 Функция редактирования списка находится в разработке.\n\n"
-            "Скоро вы сможете добавлять, удалять и изменять элементы списка!"
-        )
+        # Проверяем, что пользователь владеет этим списком
+        user_db = self.session.query(User).filter_by(telegram_id=user.id).first()
+        if not user_db or checklist.owner_id != user_db.id:
+            await query.message.reply_text("У вас нет доступа к этому списку.")
+            return
         
-        keyboard = [
-            [InlineKeyboardButton("🔙 Назад к списку", callback_data=f"view_{checklist_id}")],
-            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
-        ]
+        # Группируем элементы по категориям
+        items_by_category = {}
+        for item in checklist.items:
+            category = item.category or "Прочее"
+            if category not in items_by_category:
+                items_by_category[category] = []
+            items_by_category[category].append(item)
+        
+        message = f"📝 Редактирование списка: {checklist.title}\n\n"
+        message += "Выберите действие:"
+        
+        # Опции редактирования
+        keyboard = []
+        
+        # Добавляем кнопки для добавления элементов
+        keyboard.append([InlineKeyboardButton("➕ Добавить элемент", callback_data=f"add_item_{checklist_id}")])
+        
+        # Добавляем публичную ссылку если доступна
+        public_url = os.environ.get('PUBLIC_WEB_URL')
+        if public_url:
+            web_url = f"{public_url}/edit/{checklist_id}"
+            keyboard.append([InlineKeyboardButton("🌐 Редактировать в браузере", url=web_url)])
+            message += f"\n\n🌐 Для более удобного редактирования используйте веб-интерфейс: {web_url}"
+        
+        # Добавляем кнопки для удаления элементов по категориям
+        for category, items in items_by_category.items():
+            # Добавляем заголовок категории и список элементов
+            keyboard.append([InlineKeyboardButton(f"📂 {category} ({len(items)})", callback_data=f"category_{checklist_id}_{category}")])
+        
+        # Добавляем кнопку возврата и главного меню
+        keyboard.append([InlineKeyboardButton("🔙 Назад к списку", callback_data=f"view_{checklist_id}")])
+        keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.message.reply_text(message, reply_markup=reply_markup)
     
+    async def handle_category_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle category selection for item editing."""
+        query = update.callback_query
+        user = update.effective_user
+        
+        # Extract checklist_id and category from callback data
+        _, checklist_id, category = query.data.split('_', 2)
+        checklist_id = int(checklist_id)
+        
+        logger.info("User viewing category items", extra={
+            "user_interaction": True,
+            "user_id": user.id,
+            "username": user.username,
+            "checklist_id": checklist_id,
+            "category": category
+        })
+        
+        await query.answer()
+        
+        # Get the checklist and items in this category
+        checklist = self.session.query(Checklist).filter_by(id=checklist_id).first()
+        
+        if not checklist:
+            await query.message.reply_text("Список не найден или был удален.")
+            return
+        
+        # Проверяем, что пользователь владеет этим списком
+        user_db = self.session.query(User).filter_by(telegram_id=user.id).first()
+        if not user_db or checklist.owner_id != user_db.id:
+            await query.message.reply_text("У вас нет доступа к этому списку.")
+            return
+        
+        # Get items in this category
+        items = self.session.query(ChecklistItem).filter_by(
+            checklist_id=checklist_id,
+            category=category
+        ).all()
+        
+        message = f"📂 Категория: {category}\n\n"
+        message += "Выберите элемент для удаления:"
+        
+        keyboard = []
+        
+        # Add button for each item (for deletion)
+        for item in items:
+            keyboard.append([InlineKeyboardButton(
+                f"❌ {item.title}", 
+                callback_data=f"delete_item_{item.id}"
+            )])
+        
+        # Add back button
+        keyboard.append([InlineKeyboardButton("🔙 Назад к редактированию", callback_data=f"edit_{checklist_id}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.message.reply_text(message, reply_markup=reply_markup)
+    
+    async def handle_add_item(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle add item request."""
+        query = update.callback_query
+        user = update.effective_user
+        
+        # Extract checklist_id from callback data
+        _, checklist_id = query.data.split('_', 1)
+        checklist_id = int(checklist_id)
+        
+        logger.info("User adding item to checklist", extra={
+            "user_interaction": True,
+            "user_id": user.id,
+            "username": user.username,
+            "checklist_id": checklist_id
+        })
+        
+        await query.answer()
+        
+        # Get the checklist
+        checklist = self.session.query(Checklist).filter_by(id=checklist_id).first()
+        
+        if not checklist:
+            await query.message.reply_text("Список не найден или был удален.")
+            return
+        
+        # Проверяем, что пользователь владеет этим списком
+        user_db = self.session.query(User).filter_by(telegram_id=user.id).first()
+        if not user_db or checklist.owner_id != user_db.id:
+            await query.message.reply_text("У вас нет доступа к этому списку.")
+            return
+        
+        # Get categories
+        categories = set()
+        for item in checklist.items:
+            categories.add(item.category or "Прочее")
+        
+        # Sort categories
+        categories = sorted(list(categories))
+        if "Прочее" in categories:
+            # Move "Прочее" to the end
+            categories.remove("Прочее")
+            categories.append("Прочее")
+        
+        # Store in context
+        context.user_data['add_item_to_checklist'] = checklist_id
+        
+        message = "Выберите категорию для нового элемента:"
+        
+        keyboard = []
+        
+        # Add button for each category
+        for category in categories:
+            keyboard.append([InlineKeyboardButton(
+                f"📂 {category}", 
+                callback_data=f"add_to_category_{checklist_id}_{category}"
+            )])
+        
+        # Add button for new category
+        keyboard.append([InlineKeyboardButton(
+            "🆕 Новая категория", 
+            callback_data=f"new_category_{checklist_id}"
+        )])
+        
+        # Add back button
+        keyboard.append([InlineKeyboardButton(
+            "🔙 Отмена", 
+            callback_data=f"edit_{checklist_id}"
+        )])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.message.reply_text(message, reply_markup=reply_markup)
+    
+    async def handle_add_to_category(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle adding item to a specific category."""
+        query = update.callback_query
+        user = update.effective_user
+        
+        # Extract checklist_id and category from callback data
+        _, checklist_id, category = query.data.split('_', 2)
+        checklist_id = int(checklist_id)
+        
+        logger.info("User adding item to category", extra={
+            "user_interaction": True,
+            "user_id": user.id,
+            "username": user.username,
+            "checklist_id": checklist_id,
+            "category": category
+        })
+        
+        await query.answer()
+        
+        # Store in context
+        context.user_data['add_item_to_checklist'] = checklist_id
+        context.user_data['add_item_category'] = category
+        
+        message = f"📝 Введите название нового элемента для категории '{category}':"
+        
+        # Add back button
+        keyboard = [[InlineKeyboardButton("🔙 Отмена", callback_data=f"edit_{checklist_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.message.reply_text(message, reply_markup=reply_markup)
+        
+        # Set state for conversation handler
+        return WAITING_NEW_ITEM_NAME
+    
+    async def handle_new_item_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle new item name input."""
+        user = update.effective_user
+        item_name = update.message.text.strip()
+        
+        # Get checklist_id and category from context
+        checklist_id = context.user_data.get('add_item_to_checklist')
+        category = context.user_data.get('add_item_category')
+        
+        if not checklist_id or not category:
+            await update.message.reply_text("Произошла ошибка. Попробуйте начать добавление элемента заново.")
+            return ConversationHandler.END
+        
+        logger.info("User entered new item name", extra={
+            "user_interaction": True,
+            "user_id": user.id,
+            "username": user.username,
+            "checklist_id": checklist_id,
+            "category": category,
+            "item_name": item_name
+        })
+        
+        # Get the checklist
+        checklist = self.session.query(Checklist).filter_by(id=checklist_id).first()
+        
+        if not checklist:
+            await update.message.reply_text("Список не найден или был удален.")
+            return ConversationHandler.END
+        
+        # Проверяем, что пользователь владеет этим списком
+        user_db = self.session.query(User).filter_by(telegram_id=user.id).first()
+        if not user_db or checklist.owner_id != user_db.id:
+            await update.message.reply_text("У вас нет доступа к этому списку.")
+            return ConversationHandler.END
+        
+        # Add new item
+        max_order = self.session.query(ChecklistItem).filter_by(
+            checklist_id=checklist_id,
+            category=category
+        ).count()
+        
+        new_item = ChecklistItem(
+            title=item_name,
+            category=category,
+            checklist_id=checklist_id,
+            order=max_order + 1
+        )
+        self.session.add(new_item)
+        self.session.commit()
+        
+        logger.info("New item added", extra={
+            "user_interaction": True,
+            "user_id": user.id,
+            "checklist_id": checklist_id,
+            "item_id": new_item.id,
+            "category": category
+        })
+        
+        # Clear context
+        context.user_data.pop('add_item_to_checklist', None)
+        context.user_data.pop('add_item_category', None)
+        
+        message = f"✅ Элемент '{item_name}' добавлен в категорию '{category}'!"
+        
+        # Add buttons
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить еще", callback_data=f"add_item_{checklist_id}")],
+            [InlineKeyboardButton("🔙 Назад к списку", callback_data=f"view_{checklist_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(message, reply_markup=reply_markup)
+        
+        return ConversationHandler.END
+    
+    async def handle_delete_item(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle deletion of an item."""
+        query = update.callback_query
+        user = update.effective_user
+        
+        # Extract item_id from callback data
+        _, item_id = query.data.split('_', 1)
+        item_id = int(item_id)
+        
+        logger.info("User deleting item", extra={
+            "user_interaction": True,
+            "user_id": user.id,
+            "username": user.username,
+            "item_id": item_id
+        })
+        
+        await query.answer()
+        
+        # Get the item and its checklist
+        item = self.session.query(ChecklistItem).filter_by(id=item_id).first()
+        
+        if not item:
+            await query.message.reply_text("Элемент не найден или был удален.")
+            return
+        
+        checklist_id = item.checklist_id
+        checklist = self.session.query(Checklist).filter_by(id=checklist_id).first()
+        
+        # Verify ownership
+        user_db = self.session.query(User).filter_by(telegram_id=user.id).first()
+        if not user_db or checklist.owner_id != user_db.id:
+            await query.message.reply_text("У вас нет доступа к этому списку.")
+            return
+        
+        # Get item details for the message
+        item_title = item.title
+        category = item.category
+        
+        # Delete the item
+        self.session.delete(item)
+        self.session.commit()
+        
+        logger.info("Item deleted", extra={
+            "user_interaction": True,
+            "user_id": user.id,
+            "checklist_id": checklist_id,
+            "item_id": item_id,
+            "category": category
+        })
+        
+        message = f"✅ Элемент '{item_title}' удален из списка!"
+        
+        # Add buttons
+        keyboard = [
+            [InlineKeyboardButton("🔙 Назад к категории", callback_data=f"category_{checklist_id}_{category}")],
+            [InlineKeyboardButton("📝 Редактировать список", callback_data=f"edit_{checklist_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.message.reply_text(message, reply_markup=reply_markup)
+
     async def share_checklist(self, update: Update, context: ContextTypes.DEFAULT_TYPE, checklist_id: int) -> None:
         """Share a checklist with others."""
         query = update.callback_query
