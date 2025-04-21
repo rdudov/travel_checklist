@@ -3,208 +3,328 @@ import logging
 import json
 import aiohttp
 import requests
+import httpx
+import re
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type
+)
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 class LLMClient:
-    """Client for interacting with OpenAI API"""
+    """Client for interacting with OpenAI API for checklist generation"""
     
-    def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY")
-        self.model = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
-        self.api_base = "https://api.openai.com/v1/chat/completions"
+    def __init__(self, api_key: str = None, model: str = None):
+        # Get API key from environment or parameter
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.model = model or os.getenv("OPENAI_MODEL", "gpt-4")
         
+        # Log configuration details
         if not self.api_key:
-            logger.warning("OpenAI API key not set. LLM features will not work.")
+            logger.warning("No OpenAI API key provided, LLM features will not be available", 
+                        extra={"user_interaction": True, "component": "LLMClient"})
+        
+        # Log model selection only if API key is present
+        if self.api_key:
+            logger.info(f"LLMClient initialized with model: {self.model}", 
+                      extra={"user_interaction": True, "component": "LLMClient", "model": self.model})
+        
+    @retry(
+        retry=retry_if_exception_type((httpx.HTTPError, json.JSONDecodeError)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30)
+    )
+    async def _make_openai_request(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> Dict:
+        """Make a request to OpenAI API with retry logic"""
+        if not self.api_key:
+            logger.error("Cannot make OpenAI request: API key not provided", 
+                       extra={"user_interaction": True, "component": "LLMClient", "error_type": "missing_api_key"})
+            return {"error": "OpenAI API key not provided"}
+        
+        try:
+            logger.debug(f"Making OpenAI API request with model {self.model}", 
+                        extra={"component": "LLMClient", "model": self.model, "temperature": temperature})
+            
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self.api_key}"
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": messages,
+                        "temperature": temperature
+                    }
+                )
+                
+                # Log the API response status
+                logger.debug(f"OpenAI API response status: {response.status_code}", 
+                           extra={"component": "LLMClient", "status_code": response.status_code})
+                
+                if response.status_code != 200:
+                    error_info = response.json() if response.content else {"error": "Unknown error"}
+                    logger.error(f"OpenAI API error: {response.status_code}", 
+                               extra={"user_interaction": True, "component": "LLMClient", 
+                                      "status_code": response.status_code, "error": error_info})
+                    return {"error": f"OpenAI API error: {response.status_code}", "details": error_info}
+                
+                return response.json()
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error making OpenAI request: {str(e)}", 
+                        extra={"user_interaction": True, "component": "LLMClient", "error_type": "http_error", "error": str(e)})
+            return {"error": f"HTTP error: {str(e)}"}
+        except Exception as e:
+            logger.error(f"Error making OpenAI request: {str(e)}", 
+                        extra={"user_interaction": True, "component": "LLMClient", "error_type": "request_error", "error": str(e)})
+            return {"error": f"Error: {str(e)}"}
+    
+    def _format_weather_for_prompt(self, weather_info: Dict) -> str:
+        """Format weather information for inclusion in the prompt"""
+        if not weather_info or "location" not in weather_info:
+            return "Информация о погоде недоступна."
+        
+        try:
+            location = weather_info.get("location", "")
+            daily = weather_info.get("daily", [])
+            
+            if not daily:
+                return "Данные о погоде отсутствуют."
+            
+            weather_text = f"Прогноз погоды для {location}:\n"
+            
+            for day in daily[:5]:  # Only include first 5 days
+                date = day.get("date", "")
+                temp_min = day.get("temp_min", "")
+                temp_max = day.get("temp_max", "")
+                description = day.get("description", "")
+                
+                weather_text += f"- {date}: {temp_min}°C до {temp_max}°C, {description}\n"
+            
+            return weather_text
+        except Exception as e:
+            logger.error(f"Error formatting weather info: {str(e)}", 
+                        extra={"component": "LLMClient", "error_type": "weather_format_error", "error": str(e)})
+            return "Ошибка при обработке информации о погоде."
+    
+    def _extract_json_from_text(self, text: str) -> Dict:
+        """Extract JSON object from text response"""
+        # Try to find JSON object using regex pattern
+        json_pattern = r'```json\n([\s\S]*?)\n```'
+        matches = re.findall(json_pattern, text)
+        
+        if matches:
+            try:
+                return json.loads(matches[0])
+            except json.JSONDecodeError as e:
+                logger.error(f"Error parsing JSON from match: {str(e)}", 
+                           extra={"component": "LLMClient", "error_type": "json_parse_error", "error": str(e)})
+                logger.debug(f"Failed JSON match content: {matches[0][:100]}...")
+        
+        # If no matches with markdown formatting, try to find any JSON-like structure
+        try:
+            # Try to find any JSON object pattern
+            json_pattern = r'\{[\s\S]*?\}'
+            matches = re.findall(json_pattern, text)
+            
+            if matches:
+                # Try each match until a valid JSON is found
+                for match in matches:
+                    try:
+                        # Check if this is a complete JSON object, not a fragment
+                        if match.count('{') == match.count('}'):
+                            parsed = json.loads(match)
+                            # If it has 'categories' it's likely our desired JSON
+                            if 'categories' in parsed:
+                                return parsed
+                    except:
+                        continue
+        except Exception as e:
+            logger.error(f"Error finding JSON pattern: {str(e)}", 
+                       extra={"component": "LLMClient", "error_type": "json_extraction_error", "error": str(e)})
+        
+        logger.error("Failed to extract valid JSON from response", 
+                   extra={"component": "LLMClient", "error_type": "json_extraction_failed"})
+        return {"error": "Failed to extract valid JSON from response"}
     
     async def generate_checklist(self, 
-                                destination: str, 
-                                purpose: str, 
-                                duration: int, 
-                                start_date: str,
-                                weather_info: Dict,
-                                previous_lists: Optional[List[Dict]] = None) -> Dict[str, Any]:
+                             destination: str,
+                             purpose: str,
+                             duration: int,
+                             start_date: str = "",
+                             weather_info: Dict = None,
+                             previous_lists: List[Dict] = None) -> Dict[str, Any]:
         """
-        Generate a travel checklist using LLM
+        Generate a travel checklist using OpenAI API
         
         Args:
             destination: Place of travel
             purpose: Purpose of travel (business, beach, active, etc.)
             duration: Duration in days
-            start_date: Start date in DD.MM.YYYY format
-            weather_info: Weather forecast information
-            previous_lists: Previous user checklists for personalization
+            start_date: Start date (optional)
+            weather_info: Weather forecast information (optional)
+            previous_lists: User's previous checklists for personalization (optional)
             
         Returns:
             Dictionary with categories and items
         """
-        if not self.api_key:
-            logger.error("Cannot generate checklist with LLM: API key not set")
-            return {"error": "OpenAI API key not configured"}
+        logger.info(f"Generating checklist with LLM for {destination}, purpose: {purpose}, duration: {duration}", 
+                  extra={"user_interaction": True, "component": "LLMClient", "destination": destination, 
+                         "purpose": purpose, "duration": duration, "has_weather_info": bool(weather_info), 
+                         "has_previous_lists": bool(previous_lists and len(previous_lists) > 0)})
         
-        # Format weather information for the prompt
-        weather_text = self._format_weather_info(weather_info)
+        if not self.api_key:
+            logger.error("Cannot generate checklist: OpenAI API key not provided", 
+                       extra={"user_interaction": True, "component": "LLMClient", "error_type": "missing_api_key"})
+            return {"error": "OpenAI API key not provided"}
+        
+        # Format weather information for prompt
+        weather_text = self._format_weather_for_prompt(weather_info) if weather_info else "Информация о погоде недоступна."
         
         # Format previous lists for personalization
-        previous_lists_text = ""
+        personalization_text = ""
         if previous_lists and len(previous_lists) > 0:
-            previous_lists_text = "Пользователь ранее создавал следующие списки для поездок:\n\n"
-            for i, prev_list in enumerate(previous_lists, 1):
-                prev_list_text = f"Список {i}:\n"
-                prev_list_text += f"- Место: {prev_list.get('destination', 'Неизвестно')}\n"
-                prev_list_text += f"- Цель: {prev_list.get('purpose', 'Неизвестно')}\n"
-                prev_list_text += f"- Длительность: {prev_list.get('duration', 0)} дней\n"
+            personalization_text = "Предыдущие списки пользователя для персонализации:\n"
+            for i, prev_list in enumerate(previous_lists):
+                personalization_text += f"Список {i+1}:\n"
+                personalization_text += f"- Направление: {prev_list.get('destination', 'Неизвестно')}\n"
+                personalization_text += f"- Цель: {prev_list.get('purpose', 'Неизвестно')}\n"
+                personalization_text += f"- Длительность: {prev_list.get('duration', 0)} дней\n"
                 
-                if 'items' in prev_list and prev_list['items']:
-                    prev_list_text += "- Элементы:\n"
+                if 'items' in prev_list:
+                    personalization_text += "- Элементы по категориям:\n"
                     for category, items in prev_list['items'].items():
-                        prev_list_text += f"  * {category}: {', '.join(items)}\n"
+                        personalization_text += f"  - {category}: {', '.join(items)}\n"
+                personalization_text += "\n"
+        else:
+            personalization_text = "Предыдущие списки пользователя отсутствуют."
+        
+        # Log the generated text for debugging
+        logger.debug(f"Generated weather text for prompt: '{weather_text[:100]}...'", 
+                   extra={"component": "LLMClient"})
+        logger.debug(f"Generated personalization text for prompt: '{personalization_text[:100]}...'", 
+                   extra={"component": "LLMClient"})
+        
+        # Create message list for OpenAI chat API
+        messages = [
+            {
+                "role": "system",
+                "content": """Ты - помощник для создания чек-листов для путешествий. 
+                Создай подробный чек-лист для путешествия на основе информации о направлении, 
+                цели поездки, длительности и погоде. Организуй предметы по логическим категориям.
                 
-                previous_lists_text += prev_list_text + "\n"
+                ВАЖНО: Твой ответ должен быть в формате JSON и содержать только категории и предметы.
+                Используй только русский язык для всех элементов.
+                
+                Формат ответа (пример):
+                ```json
+                {
+                  "categories": {
+                    "Документы": ["Паспорт", "Билеты", "Страховка"],
+                    "Одежда": ["Футболки", "Джинсы", "Куртка"],
+                    "Электроника": ["Телефон", "Зарядное устройство"],
+                    "Гигиена": ["Зубная щетка", "Шампунь"]
+                  }
+                }
+                ```
+                
+                Не добавляй никакого текста до или после JSON.
+                """
+            },
+            {
+                "role": "user",
+                "content": f"""Создай чек-лист для путешествия со следующими параметрами:
+
+Направление: {destination}
+Цель поездки: {purpose}
+Длительность: {duration} дней
+{f'Дата начала: {start_date}' if start_date else ''}
+
+Информация о погоде:
+{weather_text}
+
+{personalization_text}
+
+Пожалуйста, создай детальный чек-лист с учетом этих данных, разделив предметы по логическим категориям.
+Учти цель поездки, длительность и погодные условия.
+Если у пользователя есть предыдущие списки, используй их для персонализации.
+"""
+            }
+        ]
         
-        # Create a prompt for the LLM
-        prompt = f"""
-        Создай подробный список вещей для путешествия со следующими параметрами:
+        # Log the message content (excluding system prompt for brevity)
+        logger.debug("Sending user prompt to OpenAI API", 
+                   extra={"component": "LLMClient", "prompt_length": len(messages[1]["content"])})
         
-        Место назначения: {destination}
-        Цель поездки: {purpose}
-        Длительность: {duration} дней
-        Дата начала: {start_date}
-        
-        Погода на период поездки:
-        {weather_text}
-        
-        {previous_lists_text}
-        
-        Нужно создать практичный и полный список вещей, разбитый по категориям. 
-        Включи базовые предметы, а также специфичные для данной поездки с учетом погоды, цели и длительности.
-        Если у пользователя были предыдущие поездки, учти его индивидуальные предпочтения.
-        
-        Верни ответ строго в формате JSON:
-        {{
-            "categories": {{
-                "Категория1": ["Предмет1", "Предмет2", ...],
-                "Категория2": ["Предмет1", "Предмет2", ...],
-                ...
-            }}
-        }}
-        """
-        
+        # Make the API request
         try:
-            async with aiohttp.ClientSession() as session:
-                headers = {
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
-                }
-                
-                payload = {
-                    "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": "Ты - умный помощник для путешествий, который создает подробные списки вещей"},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.7,
-                    "max_tokens": 1500
-                }
-                
-                async with session.post(self.api_base, headers=headers, json=payload) as response:
-                    if response.status != 200:
-                        logger.error(f"Error from OpenAI API: {response.status} - {await response.text()}")
-                        return {"error": f"OpenAI API error: {response.status}"}
-                    
-                    response_json = await response.json()
-                    response_text = response_json["choices"][0]["message"]["content"]
-                    
-                    # Parse the JSON from the response
-                    try:
-                        # The response might have markdown code blocks or other text around the JSON
-                        # Try to extract and parse the JSON part
-                        json_text = self._extract_json(response_text)
-                        result = json.loads(json_text)
-                        
-                        # Make sure the response has the expected structure
-                        if "categories" not in result:
-                            return {"categories": {"Общие": ["Паспорт", "Деньги", "Телефон"]}}
-                        
-                        return result
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Failed to parse LLM response as JSON: {e}")
-                        logger.error(f"Raw response: {response_text}")
-                        return {"categories": {"Общие": ["Паспорт", "Деньги", "Телефон"]}}
-        
-        except Exception as e:
-            logger.error(f"Error generating checklist with LLM: {str(e)}")
-            return {"categories": {"Общие": ["Паспорт", "Деньги", "Телефон"]}}
-    
-    def _format_weather_info(self, weather_info: Dict) -> str:
-        """Format weather information for the prompt"""
-        if not weather_info:
-            return "Информация о погоде недоступна."
-        
-        weather_text = ""
-        
-        if 'aggregated_weather' in weather_info:
-            agg_weather = weather_info['aggregated_weather']
+            logger.info("Making OpenAI API request", 
+                      extra={"user_interaction": True, "component": "LLMClient", "request_start": True})
             
-            if 'day_temp_range' in agg_weather and agg_weather['day_temp_range']:
-                weather_text += f"Температура днем: от {agg_weather['day_temp_range'][0]}°C до {agg_weather['day_temp_range'][1]}°C\n"
+            response = await self._make_openai_request(messages)
+            
+            if "error" in response:
+                logger.error(f"Error in OpenAI request: {response['error']}", 
+                           extra={"user_interaction": True, "component": "LLMClient", 
+                                  "error_type": "api_error", "error": response['error']})
+                return response
+            
+            logger.info("Successfully received response from OpenAI API", 
+                      extra={"user_interaction": True, "component": "LLMClient", "request_complete": True})
+            
+            # Extract the content from the response
+            if "choices" in response and len(response["choices"]) > 0:
+                content = response["choices"][0]["message"]["content"]
+                logger.debug(f"Received raw response from OpenAI (first 200 chars): {content[:200]}...", 
+                           extra={"component": "LLMClient"})
                 
-            if 'night_temp_range' in agg_weather and agg_weather['night_temp_range']:
-                weather_text += f"Температура ночью: от {agg_weather['night_temp_range'][0]}°C до {agg_weather['night_temp_range'][1]}°C\n"
+                # Extract JSON from the response
+                logger.debug("Attempting to extract JSON from response", 
+                           extra={"component": "LLMClient"})
+                result = self._extract_json_from_text(content)
                 
-            if 'descriptions' in agg_weather:
-                weather_text += f"Погодные условия: {', '.join(agg_weather['descriptions'])}\n"
+                if "error" in result:
+                    logger.error(f"Error extracting JSON from response: {result['error']}", 
+                               extra={"user_interaction": True, "component": "LLMClient", 
+                                      "error_type": "json_extraction_error", "error": result['error']})
+                    # Log the first 500 characters of the content for debugging
+                    logger.debug(f"Failed response content (first 500 chars): {content[:500]}...", 
+                               extra={"component": "LLMClient"})
+                    return result
                 
-            if 'avg_wind' in agg_weather:
-                weather_text += f"Ветер: в среднем {agg_weather['avg_wind']} м/с"
-                if 'max_wind' in agg_weather:
-                    weather_text += f", до {agg_weather['max_wind']} м/с"
-                weather_text += "\n"
+                # Check if categories exist and are not empty
+                if "categories" not in result or not result["categories"]:
+                    logger.error("OpenAI response didn't contain categories or they were empty", 
+                               extra={"user_interaction": True, "component": "LLMClient", 
+                                      "error_type": "missing_categories"})
+                    return {"error": "Response did not contain valid categories"}
                 
-            if 'avg_precip' in agg_weather:
-                weather_text += f"Осадки: в среднем {agg_weather['avg_precip']} мм/день"
-                if 'total_precip' in agg_weather:
-                    weather_text += f", всего до {agg_weather['total_precip']} мм за период"
-                weather_text += "\n"
+                # Count total items
+                total_items = sum(len(items) for items in result["categories"].values())
+                logger.info(f"Successfully generated checklist with {len(result['categories'])} categories and {total_items} items", 
+                          extra={"user_interaction": True, "component": "LLMClient", 
+                                 "category_count": len(result["categories"]), 
+                                 "item_count": total_items})
                 
-        elif 'forecast' in weather_info:
-            weather_text += "Прогноз по дням:\n"
-            for i, day in enumerate(weather_info['forecast']):
-                weather_text += f"День {i+1}: "
-                if 'day_temp' in day:
-                    weather_text += f"Температура днем: {day['day_temp']}°C, "
-                if 'night_temp' in day:
-                    weather_text += f"Температура ночью: {day['night_temp']}°C, "
-                if 'descriptions' in day:
-                    weather_text += f"Условия: {', '.join(day['descriptions'])}"
-                weather_text += "\n"
-        
-        return weather_text
-    
-    def _extract_json(self, text: str) -> str:
-        """Extract JSON from text that might contain markdown code blocks or other text"""
-        # Try to find JSON within code blocks
-        if "```json" in text:
-            parts = text.split("```json")
-            if len(parts) > 1:
-                json_part = parts[1].split("```")[0].strip()
-                return json_part
-        
-        # Try to find JSON within code blocks without language specifier
-        if "```" in text:
-            parts = text.split("```")
-            if len(parts) > 1:
-                json_part = parts[1].strip()
-                return json_part
-        
-        # Try to find JSON objects
-        if "{" in text and "}" in text:
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            return text[start:end]
-        
-        # Return the whole text if we couldn't extract JSON
-        return text 
+                return result
+            else:
+                logger.error("OpenAI response didn't contain any choices", 
+                           extra={"user_interaction": True, "component": "LLMClient", 
+                                  "error_type": "missing_choices", "response_keys": list(response.keys())})
+                return {"error": "Response did not contain any text"}
+                
+        except Exception as e:
+            logger.error(f"Unexpected error generating checklist: {str(e)}", 
+                       extra={"user_interaction": True, "component": "LLMClient", 
+                              "error_type": "unexpected_error", "error": str(e)})
+            import traceback
+            logger.debug(f"Detailed error traceback: {traceback.format_exc()}", 
+                       extra={"component": "LLMClient"})
+            return {"error": f"Unexpected error: {str(e)}"} 

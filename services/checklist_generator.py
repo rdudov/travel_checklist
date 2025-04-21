@@ -2,6 +2,7 @@ from typing import List, Dict, Any, Optional
 from .weather import WeatherService
 from .llm_client import LLMClient
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +34,14 @@ class ChecklistGenerator:
         Returns:
             Dictionary with checklist data
         """
+        logger.info(f"Generating travel checklist for {destination}, purpose: {purpose}, duration: {duration} days")
+        
         # Get weather forecast if not provided
         if not weather_info:
             try:
+                logger.info(f"Fetching weather forecast for {destination}")
                 weather_info = await self.weather_service.get_weather_forecast(destination)
+                logger.info("Successfully fetched weather forecast")
             except Exception as e:
                 logger.error(f"Error getting weather forecast: {str(e)}")
                 weather_info = {}
@@ -45,10 +50,10 @@ class ChecklistGenerator:
         previous_lists = []
         if user_id:
             try:
+                logger.info(f"Fetching previous checklists for user {user_id}")
                 from models.checklist import User, Checklist
                 from sqlalchemy import create_engine
                 from sqlalchemy.orm import sessionmaker
-                import os
                 
                 # Create a temporary database session
                 engine = create_engine(os.getenv('DATABASE_URL'))
@@ -60,6 +65,7 @@ class ChecklistGenerator:
                 if user:
                     # Get up to 3 most recent checklists for this user
                     checklists = session.query(Checklist).filter_by(owner_id=user.id).order_by(Checklist.created_at.desc()).limit(3).all()
+                    logger.info(f"Found {len(checklists)} previous checklists for user")
                     
                     for checklist in checklists:
                         if checklist.trip_metadata:
@@ -79,60 +85,87 @@ class ChecklistGenerator:
                             })
                 
                 session.close()
+                logger.info(f"Processed {len(previous_lists)} previous checklists for personalization")
             except Exception as e:
                 logger.error(f"Error getting previous user lists: {str(e)}")
         
         # Try to generate checklist with LLM first
-        try:
-            llm_result = await self.llm_client.generate_checklist(
-                destination=destination,
-                purpose=purpose,
-                duration=duration,
-                start_date=start_date or "",
-                weather_info=weather_info,
-                previous_lists=previous_lists
-            )
+        use_llm = True
+        llm_error = None
+        
+        if not os.getenv("OPENAI_API_KEY"):
+            logger.warning("OpenAI API key not set, skipping LLM generation")
+            use_llm = False
+        
+        if use_llm:
+            try:
+                logger.info("Attempting to generate checklist with LLM")
+                llm_result = await self.llm_client.generate_checklist(
+                    destination=destination,
+                    purpose=purpose,
+                    duration=duration,
+                    start_date=start_date or "",
+                    weather_info=weather_info,
+                    previous_lists=previous_lists
+                )
+                
+                if "error" in llm_result:
+                    llm_error = llm_result["error"]
+                    logger.warning(f"LLM generation returned error: {llm_error}")
+                    use_llm = False
+                else:
+                    logger.info("Successfully generated checklist with LLM")
+                    return {
+                        "destination": destination,
+                        "duration": duration,
+                        "purpose": purpose,
+                        "categories": llm_result.get("categories", {}),
+                        "generated_by": "llm"
+                    }
+            except Exception as e:
+                llm_error = str(e)
+                logger.error(f"Error generating checklist with LLM: {llm_error}")
+                use_llm = False
+        
+        # Fallback to rule-based generation if LLM fails or is not available
+        if not use_llm:
+            logger.info(f"Falling back to rule-based checklist generation (reason: {llm_error or 'API key not set'})")
             
-            if "error" not in llm_result:
-                # LLM generated a valid checklist
-                return {
-                    "destination": destination,
-                    "duration": duration,
-                    "purpose": purpose,
-                    "categories": llm_result.get("categories", {}),
-                    "generated_by": "llm"
-                }
-        except Exception as e:
-            logger.error(f"Error generating checklist with LLM: {str(e)}")
-        
-        # Fallback to rule-based generation if LLM fails
-        logger.info("Falling back to rule-based checklist generation")
-        
-        # Get weather-based items
-        try:
-            weather_items = []
-            if weather_info:
-                weather_items = self.weather_service.get_packing_suggestions(weather_info)
-        except Exception as e:
-            logger.error(f"Error getting weather suggestions: {str(e)}")
-            weather_items = self._get_basic_travel_items()
-        
-        # Get purpose-specific items
-        purpose_items = self._get_purpose_specific_items(purpose)
-        
-        # Get duration-specific items
-        duration_items = self._get_duration_specific_items(duration)
-        
-        # Combine all items and categorize them
-        all_items = set(weather_items + purpose_items + duration_items)
-        
-        return {
-            "destination": destination,
-            "duration": duration,
-            "purpose": purpose,
-            "categories": self._categorize_items(all_items),
-            "generated_by": "rules"
-        }
+            # Get weather-based items
+            try:
+                logger.info("Getting weather-based packing suggestions")
+                weather_items = []
+                if weather_info:
+                    weather_items = self.weather_service.get_packing_suggestions(weather_info)
+                    logger.info(f"Got {len(weather_items)} weather-based items")
+            except Exception as e:
+                logger.error(f"Error getting weather suggestions: {str(e)}")
+                weather_items = self._get_basic_travel_items()
+                logger.info("Using basic travel items as fallback")
+            
+            # Get purpose-specific items
+            purpose_items = self._get_purpose_specific_items(purpose)
+            logger.info(f"Got {len(purpose_items)} purpose-specific items for '{purpose}'")
+            
+            # Get duration-specific items
+            duration_items = self._get_duration_specific_items(duration)
+            logger.info(f"Got {len(duration_items)} duration-specific items")
+            
+            # Combine all items and categorize them
+            all_items = set(weather_items + purpose_items + duration_items)
+            logger.info(f"Combined {len(all_items)} unique items")
+            
+            categories = self._categorize_items(all_items)
+            logger.info(f"Categorized items into {len(categories)} categories")
+            
+            return {
+                "destination": destination,
+                "duration": duration,
+                "purpose": purpose,
+                "categories": categories,
+                "generated_by": "rules",
+                "llm_error": llm_error
+            }
     
     def _get_basic_travel_items(self) -> List[str]:
         """Get basic travel items that are needed regardless of weather"""

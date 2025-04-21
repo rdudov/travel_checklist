@@ -25,6 +25,49 @@ from constants import WAITING_DESTINATION, WAITING_TRIP_TYPE, WAITING_DURATION, 
 # Load environment variables
 load_dotenv()
 
+# Проверка загрузки важных переменных окружения
+def check_environment_variables():
+    """Check if all required environment variables are set and log their status."""
+    required_vars = {
+        "TELEGRAM_TOKEN": "Telegram Bot Token",
+        "DATABASE_URL": "Database URL",
+        "OPENAI_API_KEY": "OpenAI API Key",
+        "OPENAI_MODEL": "OpenAI Model Name"
+    }
+    
+    optional_vars = {
+        "OPENWEATHER_API_KEY": "OpenWeather API Key",
+        "NGROK_AUTH_TOKEN": "Ngrok Authentication Token",
+        "PUBLIC_WEB_URL": "Public Web URL"
+    }
+    
+    all_required_set = True
+    for var, description in required_vars.items():
+        value = os.getenv(var)
+        if value:
+            # Маскируем значение для безопасности в логах
+            if var == "OPENAI_API_KEY" or var == "TELEGRAM_TOKEN":
+                masked_value = f"{value[:3]}...{value[-3:]}" if len(value) > 6 else "***"
+                module_logger.info(f"{description} ({var}) is set: {masked_value}")
+            else:
+                module_logger.info(f"{description} ({var}) is set: {value}")
+        else:
+            module_logger.error(f"{description} ({var}) is NOT SET!")
+            all_required_set = False
+    
+    for var, description in optional_vars.items():
+        value = os.getenv(var)
+        if value:
+            if var == "NGROK_AUTH_TOKEN":
+                masked_value = f"{value[:3]}...{value[-3:]}" if len(value) > 6 else "***"
+                module_logger.info(f"{description} ({var}) is set: {masked_value}")
+            else:
+                module_logger.info(f"{description} ({var}) is set: {value}")
+        else:
+            module_logger.warning(f"{description} ({var}) is not set (optional)")
+    
+    return all_required_set
+
 # Custom Formatter to include extra fields
 class JsonFormatter(logging.Formatter):
     def format(self, record):
@@ -205,6 +248,11 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def main():
     """Start the bot."""
+    # Check environment variables before starting
+    all_vars_set = check_environment_variables()
+    if not all_vars_set:
+        module_logger.warning("Some required environment variables are missing. The bot may not function correctly.")
+    
     # Start web server in a separate thread
     start_web_server()
     
