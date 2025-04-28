@@ -449,9 +449,7 @@ class ChecklistHandlers:
                 
                 # Инструкции по локальному доступу
                 web_message = (
-                    f"Для доступа к веб-версии: http://localhost:8000/checklist/{checklist_id}\n"
-                    f"Если веб-интерфейс недоступен, запустите сервер командой:\n"
-                    f"python -m web.main"
+                    f"Для доступа к веб-версии: http://localhost:8000/checklist/{checklist_id}"
                 )
             
             # Create result message
@@ -505,82 +503,121 @@ class ChecklistHandlers:
             return ConversationHandler.END
 
     async def show_user_lists(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Show user's saved checklists."""
-        query = update.callback_query
+        """Show all checklists for the user."""
         user = update.effective_user
-        
-        # Clear any previous conversation state when viewing lists
-        context.user_data.clear()
-        
-        logger.info("User viewing checklists", extra={
-            "user_interaction": True,
-            "user_id": user.id,
-            "username": user.username
-        })
-        
-        await query.answer()
-        
-        user_db = self.session.query(User).filter_by(
-            telegram_id=update.effective_user.id
-        ).first()
-        
-        if not user_db or not user_db.checklists:
-            message = "У вас пока нет сохраненных списков."
-            keyboard = [[InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(text=message, reply_markup=reply_markup)
-            return
-        
-        message = "📋 Ваши списки:\n\n"
-        keyboard = []
-        
-        for checklist in user_db.checklists:
-            message += f"• {checklist.title}\n"
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"📝 {checklist.title[:30]}...",
-                    callback_data=f"view_{checklist.id}"
-                )
-            ])
-        
-        keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        query = update.callback_query
         
         try:
-            await query.edit_message_text(text=message, reply_markup=reply_markup)
+            # Get user's checklists from database
+            user_obj = self.session.query(User).filter(User.telegram_id == user.id).first()
+            if not user_obj:
+                user_obj = User(telegram_id=user.id, username=user.username)
+                self.session.add(user_obj)
+                self.session.commit()
+            
+            checklists = self.session.query(Checklist).filter(Checklist.owner_id == user_obj.id).all()
+            
+            if not checklists:
+                message = (
+                    "У вас пока нет сохраненных списков для путешествий.\n\n"
+                    "Создайте новый список с помощью команды /newtrip"
+                )
+                keyboard = [[InlineKeyboardButton("🌍 Создать новый список", callback_data="new_trip")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                if query:
+                    await query.edit_message_text(text=message, reply_markup=reply_markup)
+                else:
+                    await update.message.reply_text(message, reply_markup=reply_markup)
+                return
+            
+            message = "📋 Ваши списки для путешествий:\n\n"
+            keyboard = []
+            
+            for checklist in checklists:
+                # Get destination from trip_metadata
+                destination = "Неизвестное место"
+                if checklist.trip_metadata and 'destination' in checklist.trip_metadata:
+                    destination = checklist.trip_metadata['destination']
+                
+                # Format date if available
+                date_str = ""
+                if checklist.trip_metadata and 'start_date' in checklist.trip_metadata:
+                    try:
+                        start_date = datetime.strptime(checklist.trip_metadata['start_date'], "%d.%m.%Y")
+                        date_str = f" ({start_date.strftime('%d.%m.%Y')})"
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Add checklist to message and keyboard
+                message += f"• {destination}{date_str}\n"
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"👁 {destination}{date_str}",
+                        callback_data=f"view_{checklist.id}"
+                    )
+                ])
+            
+            # Add navigation buttons
+            keyboard.append([InlineKeyboardButton("🌍 Создать новый список", callback_data="new_trip")])
+            keyboard.append([InlineKeyboardButton("🔙 В главное меню", callback_data="main_menu")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            if query:
+                await query.edit_message_text(text=message, reply_markup=reply_markup)
+            else:
+                await update.message.reply_text(message, reply_markup=reply_markup)
+                
         except Exception as e:
-            logger.error(f"Error showing user lists: {str(e)}", extra={
-                "user_interaction": True,
-                "user_id": user.id
-            })
+            logger.error(f"Error showing user lists: {str(e)}", exc_info=True)
+            error_message = (
+                "Произошла ошибка при обработке запроса. "
+                "Пожалуйста, попробуйте снова или используйте /start для возврата в главное меню."
+            )
+            if query:
+                await query.edit_message_text(text=error_message)
+            else:
+                await update.message.reply_text(error_message)
 
     async def view_checklist(self, update: Update, context: ContextTypes.DEFAULT_TYPE, checklist_id: int) -> None:
         """View a specific checklist."""
-        query = update.callback_query
         user = update.effective_user
+        query = update.callback_query
         
-        logger.info("User viewing checklist", extra={
-            "user_interaction": True,
-            "user_id": user.id,
-            "username": user.username,
-            "checklist_id": checklist_id
-        })
-        
-        # Get the checklist from database
-        checklist = self.session.query(Checklist).filter_by(id=checklist_id).first()
+        # Get checklist from database
+        checklist = self.session.query(Checklist).filter(Checklist.id == checklist_id).first()
         
         if not checklist:
-            await query.message.reply_text("Список не найден или был удален.")
+            message = "❌ Список не найден."
+            keyboard = [[InlineKeyboardButton("🔙 Назад к спискам", callback_data="my_lists")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            if query:
+                await query.edit_message_text(text=message, reply_markup=reply_markup)
+            else:
+                await update.message.reply_text(message, reply_markup=reply_markup)
             return
         
-        # Проверяем, что пользователь владеет этим списком, сравнивая telegram_id
-        user_db = self.session.query(User).filter_by(telegram_id=user.id).first()
-        if not user_db or checklist.owner_id != user_db.id:
-            await query.message.reply_text("У вас нет доступа к этому списку.")
-            return
+        # Get destination from trip_metadata
+        destination = "Неизвестное место"
+        if checklist.trip_metadata and 'destination' in checklist.trip_metadata:
+            destination = checklist.trip_metadata['destination']
         
-        # Format and send the checklist items
-        message = f"📋 {checklist.title}\n\n"
+        # Format checklist information
+        message = f"🌍 Список для путешествия в {destination}\n\n"
+        
+        # Get start date from trip_metadata
+        if checklist.trip_metadata and 'start_date' in checklist.trip_metadata:
+            message += f"📅 Дата начала: {checklist.trip_metadata['start_date']}\n"
+        
+        # Get duration from trip_metadata
+        if checklist.trip_metadata and 'duration' in checklist.trip_metadata:
+            message += f"⏱ Длительность: {checklist.trip_metadata['duration']} дней\n"
+        
+        # Get trip type from trip_metadata
+        if checklist.trip_metadata and 'trip_type' in checklist.trip_metadata:
+            message += f"🎯 Цель поездки: {checklist.trip_metadata['trip_type']}\n"
         
         # Добавляем информацию о погоде, если она есть
         if checklist.trip_metadata and 'aggregated_weather' in checklist.trip_metadata:
@@ -607,8 +644,8 @@ class ChecklistHandlers:
                 if weather.get('total_precip'):
                     message += f", всего до {weather['total_precip']} мм за период"
                 message += "\n"
-                
-            message += "\n"
+        
+        message += "\n📋 Список вещей:\n\n"
         
         # Group items by category
         items_by_category = {}
@@ -618,11 +655,12 @@ class ChecklistHandlers:
                 items_by_category[category] = []
             items_by_category[category].append(item)
         
-        # Format items by category
+        # Add items to message
         for category, items in items_by_category.items():
-            message += f"🔹 {category}:\n"
+            message += f"📁 {category}:\n"
             for item in items:
-                message += f"  • {item.title}\n"
+                status = "✅" if item.is_completed else "•"
+                message += f"{status} {item.title}\n"
             message += "\n"
         
         # Проверяем, доступен ли публичный URL через ngrok
@@ -646,23 +684,23 @@ class ChecklistHandlers:
             
             # Инструкции по локальному доступу
             web_message = (
-                f"Для доступа к веб-версии: http://localhost:8000/checklist/{checklist_id}\n"
-                f"Если веб-интерфейс недоступен, запустите сервер командой:\n"
-                f"python -m web.main"
+                f"Для доступа к веб-версии: http://localhost:8000/checklist/{checklist_id}"
             )
             
             # Добавляем информацию о веб-интерфейсе
             message += f"{web_message}\n"
         
         keyboard = [
-            [InlineKeyboardButton("📝 Редактировать", callback_data=f"edit_{checklist_id}")],
+            [InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{checklist_id}")],
             [InlineKeyboardButton("📤 Поделиться", callback_data=f"share_{checklist_id}")],
-            *([web_button] if web_button else []),  # Добавляем кнопку, только если она есть
-            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+            [InlineKeyboardButton("🔙 Назад к спискам", callback_data="my_lists")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.message.reply_text(message, reply_markup=reply_markup)
+        if query:
+            await query.edit_message_text(text=message, reply_markup=reply_markup)
+        else:
+            await update.message.reply_text(message, reply_markup=reply_markup)
     
     async def edit_checklist(self, update: Update, context: ContextTypes.DEFAULT_TYPE, checklist_id: int) -> None:
         """Edit a specific checklist."""

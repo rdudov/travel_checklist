@@ -129,17 +129,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     welcome_message = (
         f"👋 Привет, {user.first_name}!\n\n"
-        "Я помогу вам создавать и управлять чек-листами для путешествий и не только.\n\n"
+        "Я помогу вам создавать и управлять списками для путешествий.\n\n"
         "🌍 Для создания списка для путешествия используйте /newtrip\n"
         "📋 Для просмотра ваших списков используйте /mylists\n"
-        "📝 Для создания общего чек-листа используйте /newlist\n"
         "❓ Для получения помощи используйте /help"
     )
     
     keyboard = [
         [InlineKeyboardButton("🌍 Новое путешествие", callback_data="new_trip")],
-        [InlineKeyboardButton("📋 Мои списки", callback_data="my_lists")],
-        [InlineKeyboardButton("📝 Новый чек-лист", callback_data="new_list")]
+        [InlineKeyboardButton("📋 Мои списки", callback_data="my_lists")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -156,7 +154,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 Основные команды:\n"
         "/newtrip - Создать список для путешествия\n"
         "/mylists - Посмотреть ваши сохраненные списки\n"
-        "/newlist - Создать общий чек-лист\n"
         "/help - Показать это сообщение\n\n"
         "✨ Дополнительные возможности:\n"
         "- Автоматический подбор вещей с учетом погоды\n"
@@ -191,10 +188,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await new_trip(update, context)
     elif query.data == "my_lists":
         await handlers.show_user_lists(update, context)
-    elif query.data == "new_list":
-        await start_new_list(query, context)
-    elif query.data.startswith("trip_"):
-        await handlers.handle_trip_type(update, context)
     elif query.data == "main_menu":
         try:
             await query.message.reply_text("Возвращаемся в главное меню...")
@@ -222,20 +215,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         module_logger.warning("Unknown callback data", 
                     extra={"user_interaction": True, "callback_data": query.data})
-
-async def start_new_list(query: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start creation of a new general checklist."""
-    message = (
-        "📝 Давайте создадим новый чек-лист!\n\n"
-        "Выберите тип списка или создайте свой:"
-    )
-    keyboard = [
-        [InlineKeyboardButton("🛒 Список покупок", callback_data="shopping_list")],
-        [InlineKeyboardButton("🔧 Ремонт", callback_data="repair_list")],
-        [InlineKeyboardButton("✨ Свой вариант", callback_data="custom_list")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(text=message, reply_markup=reply_markup)
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log errors caused by updates."""
