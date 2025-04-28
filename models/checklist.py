@@ -14,6 +14,14 @@ class User(BaseModel):
     
     checklists = relationship("Checklist", back_populates="owner")
 
+class TripPurpose(BaseModel):
+    """Trip purpose model for categorizing travel types"""
+    __tablename__ = "trip_purposes"
+    
+    name = Column(String, unique=True, index=True)
+    description = Column(String, nullable=True)
+    is_base = Column(Boolean, default=True)  # Whether this is a base category
+
 class Checklist(BaseModel):
     """Checklist model"""
     __tablename__ = "checklists"

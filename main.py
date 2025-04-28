@@ -253,14 +253,26 @@ def main():
     if not all_vars_set:
         module_logger.warning("Some required environment variables are missing. The bot may not function correctly.")
     
+    # Initialize base trip purposes
+    try:
+        module_logger.info("Initializing base trip purposes...")
+        from init_base_trip_purposes import init_trip_purposes
+        init_trip_purposes()
+        module_logger.info("Base trip purposes initialized successfully")
+    except Exception as e:
+        module_logger.error(f"Error initializing base trip purposes: {str(e)}")
+    
     # Start web server in a separate thread
     start_web_server()
     
     # Create the Application and pass it your bot's token
     application = Application.builder().token(os.getenv('TELEGRAM_TOKEN')).build()
 
-    # Create handlers instance
-    handlers = ChecklistHandlers(Session())
+    # Create handlers instance with LLM client
+    session = Session()
+    from services.llm_client import LLMClient
+    llm_client = LLMClient(api_key=os.getenv('OPENAI_API_KEY'))
+    handlers = ChecklistHandlers(session=session, llm_client=llm_client)
 
     # Add conversation handler for new trip creation
     trip_conv_handler = ConversationHandler(
@@ -279,7 +291,7 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_duration)
             ],
             WAITING_TRIP_TYPE: [
-                CallbackQueryHandler(handlers.handle_trip_type, pattern="^trip_")
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_trip_type)
             ],
         },
         fallbacks=[

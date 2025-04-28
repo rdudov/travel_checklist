@@ -13,9 +13,14 @@ from tenacity import (
     wait_exponential,
     retry_if_exception_type
 )
+import openai
+import time
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+# Create a directory for LLM logs if it doesn't exist
+os.makedirs("llm_logs", exist_ok=True)
 
 class LLMClient:
     """Client for interacting with OpenAI API for checklist generation"""
@@ -23,68 +28,71 @@ class LLMClient:
     def __init__(self, api_key: str = None, model: str = None):
         # Get API key from environment or parameter
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.model = model or os.getenv("OPENAI_MODEL", "gpt-4")
+        self.model = model or os.getenv("OPENAI_MODEL") or "gpt-3.5-turbo"
         
-        # Log configuration details
-        if not self.api_key:
-            logger.warning("No OpenAI API key provided, LLM features will not be available", 
-                        extra={"user_interaction": True, "component": "LLMClient"})
-        
-        # Log model selection only if API key is present
+        # Set up the API client if we have a key
         if self.api_key:
-            logger.info(f"LLMClient initialized with model: {self.model}", 
-                      extra={"user_interaction": True, "component": "LLMClient", "model": self.model})
+            openai.api_key = self.api_key
+            logger.info(f"Initialized LLM client with model: {self.model}")
+        else:
+            logger.warning("No OpenAI API key provided")
         
+    def _log_to_file(self, prefix: str, content: Dict):
+        """Log request or response to a file for debugging"""
+        try:
+            timestamp = int(time.time())
+            filename = f"llm_logs/{prefix}_{timestamp}.json"
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(content, f, ensure_ascii=False, indent=2)
+            logger.debug(f"Logged {prefix} to {filename}")
+        except Exception as e:
+            logger.error(f"Error logging {prefix} to file: {str(e)}")
+    
     @retry(
         retry=retry_if_exception_type((httpx.HTTPError, json.JSONDecodeError)),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30)
     )
     async def _make_openai_request(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> Dict:
-        """Make a request to OpenAI API with retry logic"""
+        """Make a request to the OpenAI API with retry logic"""
         if not self.api_key:
-            logger.error("Cannot make OpenAI request: API key not provided", 
-                       extra={"user_interaction": True, "component": "LLMClient", "error_type": "missing_api_key"})
             return {"error": "OpenAI API key not provided"}
         
         try:
-            logger.debug(f"Making OpenAI API request with model {self.model}", 
-                        extra={"component": "LLMClient", "model": self.model, "temperature": temperature})
+            # Log the request
+            request_data = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature
+            }
+            self._log_to_file("request", request_data)
             
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {self.api_key}"
-                    },
-                    json={
-                        "model": self.model,
-                        "messages": messages,
-                        "temperature": temperature
-                    }
-                )
-                
-                # Log the API response status
-                logger.debug(f"OpenAI API response status: {response.status_code}", 
-                           extra={"component": "LLMClient", "status_code": response.status_code})
-                
-                if response.status_code != 200:
-                    error_info = response.json() if response.content else {"error": "Unknown error"}
-                    logger.error(f"OpenAI API error: {response.status_code}", 
-                               extra={"user_interaction": True, "component": "LLMClient", 
-                                      "status_code": response.status_code, "error": error_info})
-                    return {"error": f"OpenAI API error: {response.status_code}", "details": error_info}
-                
-                return response.json()
-        except httpx.HTTPError as e:
-            logger.error(f"HTTP error making OpenAI request: {str(e)}", 
-                        extra={"user_interaction": True, "component": "LLMClient", "error_type": "http_error", "error": str(e)})
-            return {"error": f"HTTP error: {str(e)}"}
+            # Make the API request
+            response = await openai.ChatCompletion.acreate(
+                model=self.model,
+                messages=messages,
+                temperature=temperature
+            )
+            
+            # Log the response
+            self._log_to_file("response", response)
+            
+            return response
+        except openai.error.RateLimitError as e:
+            logger.error(f"OpenAI rate limit exceeded: {str(e)}")
+            return {"error": f"Rate limit exceeded: {str(e)}"}
+        except openai.error.InvalidRequestError as e:
+            logger.error(f"Invalid request to OpenAI: {str(e)}")
+            return {"error": f"Invalid request: {str(e)}"}
+        except openai.error.APIError as e:
+            logger.error(f"OpenAI API error: {str(e)}")
+            return {"error": f"API error: {str(e)}"}
+        except (openai.error.Timeout, httpx.TimeoutException) as e:
+            logger.error(f"Request to OpenAI timed out: {str(e)}")
+            return {"error": f"Request timed out: {str(e)}"}
         except Exception as e:
-            logger.error(f"Error making OpenAI request: {str(e)}", 
-                        extra={"user_interaction": True, "component": "LLMClient", "error_type": "request_error", "error": str(e)})
-            return {"error": f"Error: {str(e)}"}
+            logger.error(f"Unexpected error in OpenAI request: {str(e)}")
+            return {"error": f"Unexpected error: {str(e)}"}
     
     def _format_weather_for_prompt(self, weather_info: Dict) -> str:
         """Format weather information for inclusion in the prompt"""
@@ -157,7 +165,8 @@ class LLMClient:
     async def generate_checklist(self, 
                              destination: str,
                              purpose: str,
-                             duration: int,
+                             category: str = None,
+                             duration: int = 0,
                              start_date: str = "",
                              weather_info: Dict = None,
                              previous_lists: List[Dict] = None) -> Dict[str, Any]:
@@ -166,7 +175,8 @@ class LLMClient:
         
         Args:
             destination: Place of travel
-            purpose: Purpose of travel (business, beach, active, etc.)
+            purpose: Purpose of travel as entered by the user (original text)
+            category: Classified purpose category (optional)
             duration: Duration in days
             start_date: Start date (optional)
             weather_info: Weather forecast information (optional)
@@ -175,9 +185,10 @@ class LLMClient:
         Returns:
             Dictionary with categories and items
         """
-        logger.info(f"Generating checklist with LLM for {destination}, purpose: {purpose}, duration: {duration}", 
+        logger.info(f"Generating checklist with LLM for {destination}, purpose: {purpose}, category: {category}, duration: {duration}", 
                   extra={"user_interaction": True, "component": "LLMClient", "destination": destination, 
-                         "purpose": purpose, "duration": duration, "has_weather_info": bool(weather_info), 
+                         "purpose": purpose, "category": category, "duration": duration, 
+                         "has_weather_info": bool(weather_info), 
                          "has_previous_lists": bool(previous_lists and len(previous_lists) > 0)})
         
         if not self.api_key:
@@ -191,7 +202,11 @@ class LLMClient:
         # Format previous lists for personalization
         personalization_text = ""
         if previous_lists and len(previous_lists) > 0:
-            personalization_text = "Предыдущие списки пользователя для персонализации:\n"
+            if category:
+                personalization_text = f"Предыдущие списки пользователя для категории '{category}':\n"
+            else:
+                personalization_text = "Предыдущие списки пользователя для персонализации:\n"
+                
             for i, prev_list in enumerate(previous_lists):
                 personalization_text += f"Список {i+1}:\n"
                 personalization_text += f"- Направление: {prev_list.get('destination', 'Неизвестно')}\n"
@@ -211,6 +226,11 @@ class LLMClient:
                    extra={"component": "LLMClient"})
         logger.debug(f"Generated personalization text for prompt: '{personalization_text[:100]}...'", 
                    extra={"component": "LLMClient"})
+        
+        # Format the purpose text with category if available
+        formatted_purpose = purpose
+        if category:
+            formatted_purpose = f"{purpose} (категория: {category})"
         
         # Create message list for OpenAI chat API
         messages = [
@@ -243,7 +263,7 @@ class LLMClient:
                 "content": f"""Создай чек-лист для путешествия со следующими параметрами:
 
 Направление: {destination}
-Цель поездки: {purpose}
+Цель поездки: {formatted_purpose}
 Длительность: {duration} дней
 {f'Дата начала: {start_date}' if start_date else ''}
 
@@ -327,4 +347,161 @@ class LLMClient:
             import traceback
             logger.debug(f"Detailed error traceback: {traceback.format_exc()}", 
                        extra={"component": "LLMClient"})
-            return {"error": f"Unexpected error: {str(e)}"} 
+            return {"error": f"Unexpected error: {str(e)}"}
+    
+    async def classify_trip_purpose(self, 
+                                user_input: str, 
+                                base_purposes: List[Dict[str, str]]) -> Dict[str, Any]:
+        """
+        Classify user-entered trip purpose using LLM
+        
+        Args:
+            user_input: User-entered trip purpose
+            base_purposes: List of base trip purposes from database
+            
+        Returns:
+            Dictionary with classified purpose and whether it's a new category
+        """
+        logger.info(f"Classifying trip purpose: '{user_input}'", 
+                  extra={"user_interaction": True, "component": "LLMClient", "user_input": user_input})
+        
+        if not self.api_key:
+            logger.error("Cannot classify trip purpose: OpenAI API key not provided", 
+                       extra={"user_interaction": True, "component": "LLMClient", "error_type": "missing_api_key"})
+            return {"error": "OpenAI API key not provided"}
+        
+        # Format base purposes for prompt
+        base_purposes_text = "\n".join([f"- {p['name']}: {p['description']}" for p in base_purposes])
+        
+        # Create message list for OpenAI chat API
+        messages = [
+            {
+                "role": "system",
+                "content": """Ты - помощник для классификации целей путешествий.
+                Твоя задача - отнести введенную пользователем цель поездки к одной из базовых категорий.
+                Если цель не подходит ни к одной из базовых категорий, предложи новую категорию.
+                
+                ВАЖНО: Твой ответ должен быть в формате JSON и содержать только необходимую информацию.
+                Используй только русский язык для названий и описаний.
+                
+                Формат ответа (пример):
+                ```json
+                {
+                  "matched_category": "beach",  
+                  "is_new_category": false,
+                  "new_category_name": null,
+                  "new_category_description": null
+                }
+                ```
+                
+                или, если нужно создать новую категорию:
+                
+                ```json
+                {
+                  "matched_category": null,
+                  "is_new_category": true,
+                  "new_category_name": "diving",
+                  "new_category_description": "Дайвинг и подводное плавание"
+                }
+                ```
+                
+                Не добавляй никакого текста до или после JSON.
+                """
+            },
+            {
+                "role": "user",
+                "content": f"""Классифицируй следующую цель путешествия:
+
+Цель поездки (введено пользователем): {user_input}
+
+Базовые категории целей:
+{base_purposes_text}
+
+Пожалуйста, определи, к какой базовой категории относится эта цель.
+Если цель не подходит ни к одной из базовых категорий, предложи новую категорию (используй краткое название на английском и описание на русском).
+"""
+            }
+        ]
+        
+        # Make the API request
+        try:
+            logger.info("Making OpenAI API request for trip purpose classification", 
+                      extra={"user_interaction": True, "component": "LLMClient", "request_start": True})
+            
+            response = await self._make_openai_request(messages)
+            
+            if "error" in response:
+                logger.error(f"Error in OpenAI request: {response['error']}", 
+                           extra={"user_interaction": True, "component": "LLMClient", 
+                                  "error_type": "api_error", "error": response['error']})
+                return response
+            
+            logger.info("Successfully received response from OpenAI API", 
+                      extra={"user_interaction": True, "component": "LLMClient", "request_complete": True})
+            
+            # Extract the content from the response
+            if "choices" in response and len(response["choices"]) > 0:
+                content = response["choices"][0]["message"]["content"]
+                logger.debug(f"Received raw response from OpenAI (first 200 chars): {content[:200]}...", 
+                           extra={"component": "LLMClient"})
+                
+                # Extract JSON from the response
+                logger.debug("Attempting to extract JSON from response", 
+                           extra={"component": "LLMClient"})
+                result = self._extract_json_from_text(content)
+                
+                if "error" in result:
+                    logger.error(f"Error extracting JSON from response: {result['error']}", 
+                               extra={"user_interaction": True, "component": "LLMClient", 
+                                      "error_type": "json_extraction_error", "error": result['error']})
+                    # Fallback to a default category if JSON extraction fails
+                    return {
+                        "matched_category": "other",
+                        "is_new_category": False,
+                        "new_category_name": None,
+                        "new_category_description": None
+                    }
+                
+                # Check if result has required fields
+                if "matched_category" not in result and "is_new_category" not in result:
+                    logger.error("OpenAI response didn't contain required fields", 
+                               extra={"user_interaction": True, "component": "LLMClient", 
+                                      "error_type": "missing_fields"})
+                    # Fallback to a default category
+                    return {
+                        "matched_category": "other",
+                        "is_new_category": False,
+                        "new_category_name": None,
+                        "new_category_description": None
+                    }
+                
+                logger.info(f"Successfully classified trip purpose", 
+                          extra={"user_interaction": True, "component": "LLMClient", 
+                                 "is_new_category": result.get("is_new_category", False),
+                                 "matched_category": result.get("matched_category", "other")})
+                
+                return result
+            else:
+                logger.error("OpenAI response didn't contain any choices", 
+                           extra={"user_interaction": True, "component": "LLMClient", 
+                                  "error_type": "missing_choices", "response_keys": list(response.keys())})
+                return {
+                    "matched_category": "other",
+                    "is_new_category": False,
+                    "new_category_name": None,
+                    "new_category_description": None
+                }
+                
+        except Exception as e:
+            logger.error(f"Unexpected error classifying trip purpose: {str(e)}", 
+                       extra={"user_interaction": True, "component": "LLMClient", 
+                              "error_type": "unexpected_error", "error": str(e)})
+            import traceback
+            logger.debug(f"Detailed error traceback: {traceback.format_exc()}", 
+                       extra={"component": "LLMClient"})
+            return {
+                "matched_category": "other", 
+                "is_new_category": False,
+                "new_category_name": None,
+                "new_category_description": None
+            } 

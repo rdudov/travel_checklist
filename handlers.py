@@ -19,10 +19,12 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 class ChecklistHandlers:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, llm_client=None):
+        """Initialize handlers with database session."""
         self.session = session
-        self.weather_service = WeatherService()
         self.checklist_generator = ChecklistGenerator()
+        self.weather_service = WeatherService()
+        self.llm_client = llm_client or self.checklist_generator.llm_client
 
     async def handle_destination(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle destination input for new trip checklist."""
@@ -112,127 +114,93 @@ class ChecklistHandlers:
         """Handle trip duration input."""
         user = update.effective_user
         
+        logger.info("User interaction", extra={
+            "user_interaction": True,
+            "user_id": user.id,
+            "username": user.username,
+            "action": "duration_input",
+            "input": update.message.text
+        })
+        
         try:
-            duration = int(update.message.text)
+            # Parse duration as integer
+            duration = int(update.message.text.strip())
+            
             if duration <= 0:
                 raise ValueError("Duration must be positive")
                 
-            logger.info("User interaction", extra={
-                "user_interaction": True,
-                "user_id": user.id,
-                "username": user.username,
-                "action": "duration_input",
-                "duration": duration
-            })
-                
             context.user_data['duration'] = duration
             
-            # Check if we have all required data
-            required_data = ['destination', 'start_date']
-            missing_data = [key for key in required_data if key not in context.user_data]
-            
-            if missing_data:
-                logger.error("Missing required data", extra={
-                    "user_interaction": True,
-                    "user_id": user.id,
-                    "missing_data": missing_data,
-                    "current_state": context.user_data.get('state')
-                })
-                await update.message.reply_text(
-                    "😔 Произошла ошибка: отсутствуют необходимые данные. "
-                    "Пожалуйста, начните создание списка заново с помощью команды /newtrip"
-                )
-                context.user_data.clear()
-                return ConversationHandler.END
-            
-            # Теперь запрашиваем данные о погоде
+            # Get weather info for this destination
             try:
-                logger.info("Fetching weather info", extra={
-                    "user_interaction": True,
-                    "user_id": user.id,
-                    "destination": context.user_data['destination']
-                })
+                # Отправим сообщение о том, что запрашиваем погоду
+                await update.message.reply_text(
+                    f"🔄 Получаю информацию о погоде для {context.user_data['destination']}...\n"
+                    f"Это может занять несколько секунд."
+                )
                 
-                weather_info = await self.weather_service.get_weather_forecast(context.user_data['destination'])
+                # Генерируем прогноз погоды
+                weather_info = await self.weather_service.get_weather_forecast(
+                    context.user_data['destination']
+                )
+                
+                # Сохраним погоду в данных пользователя
                 context.user_data['weather_info'] = weather_info
                 
-                logger.info("Weather info received", extra={
-                    "user_interaction": True,
-                    "user_id": user.id,
-                    "destination": context.user_data['destination']
-                })
-                
-                # Агрегируем информацию о погоде
-                forecast_days = min(duration, len(weather_info['forecast']))
-                
-                # Собираем статистику по температуре
-                day_temps = []
-                night_temps = []
-                descriptions = set()
+                # Создадим агрегированное описание погоды
+                weather_description = []
+                temp_min = []
+                temp_max = []
                 wind_speeds = []
                 precipitation_amounts = []
                 
-                for i in range(forecast_days):
-                    day_forecast = weather_info['forecast'][i]
+                for day_forecast in weather_info.get('daily', []):
+                    # Добавим общее описание погоды
+                    if 'description' in day_forecast:
+                        weather_description.append(day_forecast['description'])
                     
-                    # Получаем температуры
-                    if 'day_temp' in day_forecast:
-                        day_temps.append(day_forecast['day_temp'])
-                    elif 'avg_temp' in day_forecast:
-                        day_temps.append(day_forecast['avg_temp'])
-                        
-                    if 'night_temp' in day_forecast:
-                        night_temps.append(day_forecast['night_temp'])
+                    # Соберём температуры
+                    if 'temp_min' in day_forecast:
+                        temp_min.append(day_forecast['temp_min'])
+                    if 'temp_max' in day_forecast:
+                        temp_max.append(day_forecast['temp_max'])
                     
-                    # Собираем описания погоды
-                    if 'descriptions' in day_forecast:
-                        descriptions.update(day_forecast['descriptions'])
-                    
-                    # Ветер
+                    # Соберём скорость ветра
                     if 'wind_speed' in day_forecast:
                         wind_speeds.append(day_forecast['wind_speed'])
                     
-                    # Осадки
+                    # Соберём данные об осадках
                     if 'precipitation' in day_forecast:
                         precipitation_amounts.append(day_forecast['precipitation'])
                 
-                # Формируем агрегированное сообщение о погоде
-                weather_message = f"🌍 Прогноз погоды в {context.user_data['destination']} на период поездки:\n\n"
+                # Формируем погодное сообщение
+                weather_message = f"📊 Погода в {context.user_data['destination']} на {min(duration, len(weather_info.get('daily', [])))} дней:\n\n"
                 
-                # Температура днем
-                if day_temps:
-                    min_day_temp = min(day_temps)
-                    max_day_temp = max(day_temps)
-                    weather_message += f"🌡 Днем: от {min_day_temp}°C до {max_day_temp}°C\n"
-                
-                # Температура ночью
-                if night_temps:
-                    min_night_temp = min(night_temps)
-                    max_night_temp = max(night_temps)
-                    weather_message += f"🌙 Ночью: от {min_night_temp}°C до {max_night_temp}°C\n"
-                
-                # Описание погоды
-                if descriptions:
-                    weather_message += f"☁️ Погода: {', '.join(descriptions)}\n"
-                
-                # Ветер
-                if wind_speeds:
-                    avg_wind = round(statistics.mean(wind_speeds), 1)
-                    max_wind = max(wind_speeds)
-                    weather_message += f"💨 Ветер: в среднем {avg_wind} м/с, максимум до {max_wind} м/с\n"
-                
-                # Осадки
-                if precipitation_amounts:
-                    total_precip = sum(precipitation_amounts)
-                    weather_message += f"🌧 Осадки: в среднем {round(total_precip/len(precipitation_amounts), 1)} мм/день, всего до {round(total_precip, 1)} мм за период\n"
+                # Если есть прогноз хотя бы на один день, добавим его
+                if weather_info.get('daily', []):
+                    weather_message += f"• Погода: {', '.join(set(weather_description[:3]))}...\n"
                     
-                # Сохраняем агрегированную информацию для отображения на веб-странице
+                    if temp_min and temp_max:
+                        avg_min = sum(temp_min) / len(temp_min)
+                        avg_max = sum(temp_max) / len(temp_max)
+                        weather_message += f"• Температура: от {avg_min:.1f}°C до {avg_max:.1f}°C\n"
+                    
+                    if wind_speeds:
+                        max_wind = max(wind_speeds)
+                        weather_message += f"• Ветер: до {max_wind} м/с\n"
+                    
+                    if precipitation_amounts:
+                        total_precip = sum(precipitation_amounts)
+                        weather_message += f"• Осадки: {total_precip:.1f} мм"
+                else:
+                    weather_message += "К сожалению, не удалось получить подробный прогноз погоды."
+                
+                # Сохраним агрегированные данные о погоде
                 context.user_data['aggregated_weather'] = {
-                    'day_temp_range': [min_day_temp, max_day_temp] if day_temps else None,
-                    'night_temp_range': [min_night_temp, max_night_temp] if night_temps else None,
-                    'descriptions': list(descriptions),
-                    'avg_wind': avg_wind if wind_speeds else None,
-                    'max_wind': max_wind if wind_speeds else None,
+                    'descriptions': list(set(weather_description)),
+                    'avg_temp_min': sum(temp_min)/len(temp_min) if temp_min else None,
+                    'avg_temp_max': sum(temp_max)/len(temp_max) if temp_max else None,
+                    'max_wind': max(wind_speeds) if wind_speeds else None,
                     'avg_precip': round(total_precip/len(precipitation_amounts), 1) if precipitation_amounts else None,
                     'total_precip': round(total_precip, 1) if precipitation_amounts else None
                 }
@@ -241,17 +209,11 @@ class ChecklistHandlers:
                 await update.message.reply_text(weather_message)
                 
                 # Отправляем вопрос о цели поездки
-                message = "Какова цель вашей поездки?"
-                
-                keyboard = [
-                    [InlineKeyboardButton("🏖 Пляжный отдых", callback_data="trip_beach")],
-                    [InlineKeyboardButton("🏃 Активный отдых", callback_data="trip_active")],
-                    [InlineKeyboardButton("💼 Бизнес", callback_data="trip_business")],
-                    [InlineKeyboardButton("🎯 Другое", callback_data="trip_other")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await update.message.reply_text(message, reply_markup=reply_markup)
+                await update.message.reply_text(
+                    "Какова цель вашей поездки? Опишите её своими словами.\n\n"
+                    "Например: отдохнуть на пляже, посетить деловую конференцию, "
+                    "осмотреть достопримечательности, поход в горы и т.д."
+                )
                 return WAITING_TRIP_TYPE
                 
             except Exception as e:
@@ -263,18 +225,10 @@ class ChecklistHandlers:
                 })
                 await update.message.reply_text(
                     "⚠️ Не удалось получить информацию о погоде. Но мы все равно продолжим.\n\n"
-                    "Какова цель вашей поездки?"
+                    "Какова цель вашей поездки? Опишите её своими словами.\n\n"
+                    "Например: отдохнуть на пляже, посетить деловую конференцию, "
+                    "осмотреть достопримечательности, поход в горы и т.д."
                 )
-                
-                keyboard = [
-                    [InlineKeyboardButton("🏖 Пляжный отдых", callback_data="trip_beach")],
-                    [InlineKeyboardButton("🏃 Активный отдых", callback_data="trip_active")],
-                    [InlineKeyboardButton("💼 Бизнес", callback_data="trip_business")],
-                    [InlineKeyboardButton("🎯 Другое", callback_data="trip_other")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await update.message.reply_text(message, reply_markup=reply_markup)
                 return WAITING_TRIP_TYPE
             
         except ValueError:
@@ -300,174 +254,255 @@ class ChecklistHandlers:
             return ConversationHandler.END
 
     async def handle_trip_type(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle trip type selection."""
-        query = update.callback_query
+        """Handle trip type input."""
         user = update.effective_user
+        
+        # Now handling text input instead of callback query
+        user_input = update.message.text.strip()
         
         logger.info("User interaction", extra={
             "user_interaction": True,
             "user_id": user.id,
             "username": user.username,
-            "action": "trip_type_selection",
-            "trip_type": query.data
+            "action": "trip_type_input",
+            "user_input": user_input
         })
         
-        await query.answer()
+        # Store the original user input
+        context.user_data['original_trip_purpose'] = user_input
         
-        trip_type = query.data.replace('trip_', '')
-        context.user_data['trip_type'] = trip_type
-        
-        # Generate checklist based on collected information
-        logger.info("Generating checklist", extra={
-            "user_interaction": True,
-            "user_id": user.id,
-            "destination": context.user_data['destination'],
-            "trip_type": context.user_data['trip_type'],
-            "duration": context.user_data['duration'],
-            "start_date": context.user_data['start_date']
-        })
-        
-        # Отправим сообщение о том, что генерируем список
-        progress_message = await query.message.reply_text(
-            "🔄 Генерирую список вещей для вашей поездки...\n"
+        # Send message about processing
+        progress_message = await update.message.reply_text(
+            "🔄 Обрабатываю информацию о целях поездки...\n"
             "Это может занять несколько секунд."
         )
         
-        # Получаем пользователя из базы данных или создаем нового
-        user_db = self.session.query(User).filter_by(
-            telegram_id=update.effective_user.id
-        ).first()
+        # Get all base trip purposes from database
+        from models.checklist import TripPurpose
         
-        if not user_db:
-            user_db = User(
-                telegram_id=update.effective_user.id,
-                username=update.effective_user.username,
-                first_name=update.effective_user.first_name,
-                last_name=update.effective_user.last_name
+        # Get all base trip purposes
+        base_purposes = []
+        try:
+            base_purposes = self.session.query(TripPurpose).all()
+            logger.info(f"Found {len(base_purposes)} base trip purposes in database")
+            
+            # If no base purposes in database, initialize them
+            if not base_purposes:
+                logger.info("No base trip purposes found in database, initializing them")
+                from init_base_trip_purposes import init_trip_purposes
+                init_trip_purposes()
+                base_purposes = self.session.query(TripPurpose).all()
+                logger.info(f"Initialized {len(base_purposes)} base trip purposes")
+            
+            # Convert to dict format for LLM
+            base_purposes_for_llm = [
+                {"name": p.name, "description": p.description} 
+                for p in base_purposes
+            ]
+            
+            # Classify the user input using LLM
+            classification_result = await self.llm_client.classify_trip_purpose(
+                user_input, 
+                base_purposes_for_llm
             )
-            self.session.add(user_db)
+            
+            # Handle new category if needed
+            if classification_result.get("is_new_category", False) and classification_result.get("new_category_name"):
+                new_name = classification_result["new_category_name"]
+                new_description = classification_result["new_category_description"] or new_name
+                
+                # Check if this category already exists (just in case)
+                existing = self.session.query(TripPurpose).filter_by(name=new_name).first()
+                if not existing:
+                    # Add the new category to the database
+                    new_purpose = TripPurpose(
+                        name=new_name,
+                        description=new_description,
+                        is_base=False  # Not a base category
+                    )
+                    self.session.add(new_purpose)
+                    self.session.commit()
+                    logger.info(f"Added new trip purpose category: {new_name} - {new_description}")
+                    
+                # Use the new category
+                trip_type = new_name
+            else:
+                # Use the matched category
+                trip_type = classification_result.get("matched_category", "other")
+            
+            # Store the classified trip type
+            context.user_data['trip_type'] = trip_type
+            
+            # Generate checklist based on collected information
+            logger.info("Generating checklist", extra={
+                "user_interaction": True,
+                "user_id": user.id,
+                "destination": context.user_data['destination'],
+                "trip_type": context.user_data['trip_type'],
+                "original_purpose": context.user_data['original_trip_purpose'],
+                "duration": context.user_data['duration'],
+                "start_date": context.user_data['start_date']
+            })
+            
+            # Отправим сообщение о том, что генерируем список
+            await progress_message.edit_text(
+                "🔄 Генерирую список вещей для вашей поездки...\n"
+                "Это может занять несколько секунд."
+            )
+            
+            # Получаем пользователя из базы данных или создаем нового
+            from models.checklist import User
+            user_db = self.session.query(User).filter_by(
+                telegram_id=update.effective_user.id
+            ).first()
+            
+            if not user_db:
+                user_db = User(
+                    telegram_id=update.effective_user.id,
+                    username=update.effective_user.username,
+                    first_name=update.effective_user.first_name,
+                    last_name=update.effective_user.last_name
+                )
+                self.session.add(user_db)
+                self.session.commit()
+            
+            # Generate checklist with LLM
+            checklist = await self.checklist_generator.generate_travel_checklist(
+                destination=context.user_data['destination'],
+                purpose=context.user_data['original_trip_purpose'],  # Pass original purpose
+                category=context.user_data['trip_type'],  # Pass classified category
+                duration=context.user_data['duration'],
+                start_date=context.user_data['start_date'],
+                weather_info=context.user_data.get('weather_info', {}),
+                user_id=user_db.id  # Pass user ID for fetching previous lists
+            )
+            
+            # Create a better title with date, time, purpose and duration
+            creation_time = datetime.now().strftime("%H:%M")
+            trip_purpose = context.user_data['original_trip_purpose']  # Show original purpose in title
+            trip_title = f"{context.user_data['destination']} с {context.user_data['start_date']} ({trip_purpose} {context.user_data['duration']} дней)"
+            
+            from models.checklist import Checklist, ChecklistItem
+            db_checklist = Checklist(
+                title=trip_title,
+                type='travel',
+                trip_metadata={
+                    'destination': context.user_data['destination'],
+                    'trip_type': context.user_data['trip_type'],  # Classified type
+                    'original_purpose': context.user_data['original_trip_purpose'],  # Original input
+                    'duration': context.user_data['duration'],
+                    'start_date': context.user_data['start_date'],
+                    'weather': context.user_data.get('weather_info', {}),
+                    'aggregated_weather': context.user_data.get('aggregated_weather', {})
+                },
+                owner_id=user_db.id
+            )
+            self.session.add(db_checklist)
             self.session.commit()
-        
-        # Generate checklist with LLM (now passing user ID for personalization)
-        checklist = await self.checklist_generator.generate_travel_checklist(
-            destination=context.user_data['destination'],
-            purpose=context.user_data['trip_type'],
-            duration=context.user_data['duration'],
-            start_date=context.user_data['start_date'],
-            weather_info=context.user_data.get('weather_info', {}),
-            user_id=user.id  # Pass user ID for personalization
-        )
-        
-        # Create a better title with date, time, purpose and duration
-        creation_time = datetime.now().strftime("%H:%M")
-        trip_purpose = context.user_data['trip_type']
-        trip_title = f"{context.user_data['destination']} с {context.user_data['start_date']} ({trip_purpose} {context.user_data['duration']} дней)"
-        
-        db_checklist = Checklist(
-            title=trip_title,
-            type='travel',
-            trip_metadata={
-                'destination': context.user_data['destination'],
-                'trip_type': context.user_data['trip_type'],
-                'duration': context.user_data['duration'],
-                'start_date': context.user_data['start_date'],
-                'weather': context.user_data.get('weather_info', {}),
-                'aggregated_weather': context.user_data.get('aggregated_weather', {})
-            },
-            owner_id=user_db.id
-        )
-        self.session.add(db_checklist)
-        self.session.commit()
-        
-        logger.info("Checklist saved", extra={
-            "user_interaction": True,
-            "user_id": user_db.id,
-            "checklist_id": db_checklist.id,
-            "generation_method": checklist.get("generated_by", "unknown")
-        })
-        
-        # Convert categories from the generator to our item format
-        items = []
-        for category, category_items in checklist['categories'].items():
-            for item in category_items:
-                items.append({
-                    'title': item,
-                    'category': category
-                })
-        
-        # Add all items to the database
-        for item in items:
-            checklist_item = ChecklistItem(
-                title=item['title'],
-                description=item.get('description'),
-                category=item.get('category'),
-                checklist_id=db_checklist.id,
-                order=item.get('order', 0)
+            
+            logger.info("Checklist saved", extra={
+                "user_interaction": True,
+                "user_id": user_db.id,
+                "checklist_id": db_checklist.id,
+                "generation_method": checklist.get("generated_by", "unknown")
+            })
+            
+            # Convert categories from the generator to our item format
+            items = []
+            for category, category_items in checklist['categories'].items():
+                for item in category_items:
+                    items.append({
+                        'title': item,
+                        'category': category
+                    })
+            
+            # Add all items to the database
+            for item in items:
+                checklist_item = ChecklistItem(
+                    title=item['title'],
+                    description=item.get('description'),
+                    category=item.get('category'),
+                    checklist_id=db_checklist.id,
+                    order=item.get('order', 0)
+                )
+                self.session.add(checklist_item)
+            self.session.commit()
+            
+            # Для публичного доступа требуется внешний URL
+            checklist_id = db_checklist.id
+            
+            # Проверяем, доступен ли публичный URL через ngrok
+            public_url = os.environ.get('PUBLIC_WEB_URL')
+            
+            if public_url:
+                # Если есть публичный URL, используем его для кнопки
+                web_url = f"{public_url}/checklist/{checklist_id}"
+                
+                # Добавляем кнопку для открытия веб-версии
+                web_button = [InlineKeyboardButton("🌐 Открыть в браузере", url=web_url)]
+                
+                # Текст сообщения с публичной ссылкой
+                web_message = f"🌐 Веб-версия списка доступна по ссылке: {web_url}"
+            else:
+                # Если публичного URL нет, показываем инструкции по локальному доступу
+                web_button = []  # Нет кнопки для локального URL
+                
+                # Инструкции по локальному доступу
+                web_message = (
+                    f"Для доступа к веб-версии: http://localhost:8000/checklist/{checklist_id}\n"
+                    f"Если веб-интерфейс недоступен, запустите сервер командой:\n"
+                    f"python -m web.main"
+                )
+            
+            # Create result message
+            result_text = (
+                f"✅ Готово! Создан чек-лист для поездки в {context.user_data['destination']}.\n\n"
+                f"📋 Всего элементов: {len(items)}\n"
+                f"📁 Категорий: {len(checklist['categories'])}\n\n"
+                f"{web_message}"
             )
-            self.session.add(checklist_item)
-        self.session.commit()
-        
-        # Для публичного доступа требуется внешний URL
-        checklist_id = db_checklist.id
-        
-        # Проверяем, доступен ли публичный URL через ngrok
-        public_url = os.environ.get('PUBLIC_WEB_URL')
-        
-        if public_url:
-            # Если есть публичный URL, используем его для кнопки
-            web_url = f"{public_url}/checklist/{checklist_id}"
             
-            # Добавляем кнопку для открытия веб-версии
-            web_button = [InlineKeyboardButton("🌐 Открыть в браузере", url=web_url)]
+            # Send message with inline keyboard for web view and voice
+            keyboard = []
+            if web_button:
+                keyboard.append(web_button)
             
-            # Текст сообщения с публичной ссылкой
-            web_message = f"🌐 Веб-версия списка доступна по ссылке: {web_url}"
-        else:
-            # Если публичного URL нет, показываем инструкции по локальному доступу
-            web_button = []  # Нет кнопки для локального URL
+            keyboard.append([InlineKeyboardButton("📝 Мои списки", callback_data="my_lists")])
+            keyboard.append([InlineKeyboardButton("➕ Новый список", callback_data="new_trip")])
+            keyboard.append([InlineKeyboardButton("🏠 В главное меню", callback_data="main_menu")])
             
-            # Инструкции по локальному доступу
-            web_message = (
-                f"Для доступа к веб-версии: http://localhost:8000/checklist/{checklist_id}\n"
-                f"Если веб-интерфейс недоступен, запустите сервер командой:\n"
-                f"python -m web.main"
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(result_text, reply_markup=reply_markup)
+            
+            # Clear user data
+            context.user_data.clear()
+            
+            return ConversationHandler.END
+            
+        except Exception as e:
+            logger.error("Error processing trip type input", extra={
+                "user_interaction": True,
+                "user_id": user.id,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            })
+            
+            # In case of error, use a default category
+            context.user_data['trip_type'] = "other"
+            context.user_data['original_trip_purpose'] = user_input
+            
+            await update.message.reply_text(
+                "⚠️ Произошла ошибка при обработке цели поездки. Используем категорию 'Другое'.\n"
+                "Продолжаем создание чек-листа..."
             )
-        
-        # Format and send the checklist
-        message = (
-            f"✅ Ваш список для поездки в {context.user_data['destination']} готов!\n\n"
-            "📋 Вот что нужно взять с собой:\n\n"
-        )
-        
-        for category, category_items in checklist['categories'].items():
-            message += f"🔹 {category}:\n"
-            for item in category_items:
-                message += f"  • {item}\n"
-            message += "\n"
-        
-        # Добавляем информацию о веб-интерфейсе
-        message += f"{web_message}\n"
-        
-        keyboard = [
-            [InlineKeyboardButton("📝 Редактировать", callback_data=f"edit_{db_checklist.id}")],
-            [InlineKeyboardButton("📤 Поделиться", callback_data=f"share_{db_checklist.id}")],
-            *([web_button] if web_button else []),  # Добавляем кнопку, только если она есть
-            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Удаляем сообщение о прогрессе и отправляем результат
-        await progress_message.delete()
-        await query.message.reply_text(message, reply_markup=reply_markup)
-        
-        # Clear user data and end conversation
-        logger.info("Checklist creation completed", extra={
-            "user_interaction": True,
-            "user_id": user_db.id,
-            "checklist_id": db_checklist.id
-        })
-        context.user_data.clear()
-        return ConversationHandler.END
+            
+            # For brevity, let's send a generic error message and restart the conversation
+            await update.message.reply_text(
+                "😔 Произошла ошибка при обработке данных. Пожалуйста, попробуйте снова."
+            )
+            context.user_data.clear()
+            return ConversationHandler.END
 
     async def show_user_lists(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show user's saved checklists."""

@@ -19,38 +19,34 @@ class ChecklistGenerator:
                                       duration: int, 
                                       start_date: Optional[str] = None,
                                       weather_info: Optional[Dict] = None,
+                                      category: Optional[str] = None,
                                       user_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Generate a travel checklist based on destination, duration, purpose and other factors
         
         Args:
             destination: Place of travel
-            purpose: Purpose of travel (business, beach, active, etc.)
+            purpose: Purpose of travel as entered by user (original text)
             duration: Duration in days
             start_date: Start date in DD.MM.YYYY format (optional)
             weather_info: Weather forecast information (optional, will be fetched if not provided)
+            category: Classified trip category (optional)
             user_id: User ID for personalization based on previous lists (optional)
         
         Returns:
             Dictionary with checklist data
         """
-        logger.info(f"Generating travel checklist for {destination}, purpose: {purpose}, duration: {duration} days")
+        logger.info(f"Generating travel checklist for {destination}, purpose: {purpose}, category: {category}, duration: {duration} days")
         
-        # Get weather forecast if not provided
         if not weather_info:
-            try:
-                logger.info(f"Fetching weather forecast for {destination}")
-                weather_info = await self.weather_service.get_weather_forecast(destination)
-                logger.info("Successfully fetched weather forecast")
-            except Exception as e:
-                logger.error(f"Error getting weather forecast: {str(e)}")
-                weather_info = {}
+            logger.warning("No weather info")
+            weather_info = {}
         
-        # Try to get previous user lists for personalization
         previous_lists = []
+        # Try to get previous user lists for personalization if not provided and user_id is given
         if user_id:
             try:
-                logger.info(f"Fetching previous checklists for user {user_id}")
+                logger.info(f"Fetching previous checklists for user {user_id} and category '{category}'")
                 from models.checklist import User, Checklist
                 from sqlalchemy import create_engine
                 from sqlalchemy.orm import sessionmaker
@@ -63,23 +59,30 @@ class ChecklistGenerator:
                 # Get user's previous lists
                 user = session.query(User).filter_by(telegram_id=user_id).first()
                 if user:
-                    # Get up to 3 most recent checklists for this user
-                    checklists = session.query(Checklist).filter_by(owner_id=user.id).order_by(Checklist.created_at.desc()).limit(3).all()
-                    logger.info(f"Found {len(checklists)} previous checklists for user")
+                    # Get up to 3 most recent checklists for this user with same category if available
+                    query = session.query(Checklist).filter_by(owner_id=user.id)
+                    if category:
+                        query = query.filter(
+                            Checklist.trip_metadata.has_key('trip_type'),
+                            Checklist.trip_metadata['trip_type'].astext == category
+                        )
+                    checklists = query.order_by(Checklist.created_at.desc()).limit(3).all()
+                    logger.info(f"Found {len(checklists)} previous checklists for user with category '{category}'")
                     
                     for checklist in checklists:
                         if checklist.trip_metadata:
                             # Convert database checklist to format needed for LLM
                             items_by_category = {}
                             for item in checklist.items:
-                                category = item.category or "Прочее"
-                                if category not in items_by_category:
-                                    items_by_category[category] = []
-                                items_by_category[category].append(item.title)
+                                item_category = item.category or "Прочее"
+                                if item_category not in items_by_category:
+                                    items_by_category[item_category] = []
+                                items_by_category[item_category].append(item.title)
                             
                             previous_lists.append({
                                 'destination': checklist.trip_metadata.get('destination', ''),
-                                'purpose': checklist.trip_metadata.get('trip_type', ''),
+                                'purpose': checklist.trip_metadata.get('original_purpose', 
+                                                                    checklist.trip_metadata.get('trip_type', '')),
                                 'duration': checklist.trip_metadata.get('duration', 0),
                                 'items': items_by_category
                             })
@@ -88,7 +91,7 @@ class ChecklistGenerator:
                 logger.info(f"Processed {len(previous_lists)} previous checklists for personalization")
             except Exception as e:
                 logger.error(f"Error getting previous user lists: {str(e)}")
-        
+
         # Try to generate checklist with LLM first
         use_llm = True
         llm_error = None
@@ -103,6 +106,7 @@ class ChecklistGenerator:
                 llm_result = await self.llm_client.generate_checklist(
                     destination=destination,
                     purpose=purpose,
+                    category=category,
                     duration=duration,
                     start_date=start_date or "",
                     weather_info=weather_info,
@@ -143,9 +147,10 @@ class ChecklistGenerator:
                 weather_items = self._get_basic_travel_items()
                 logger.info("Using basic travel items as fallback")
             
-            # Get purpose-specific items
-            purpose_items = self._get_purpose_specific_items(purpose)
-            logger.info(f"Got {len(purpose_items)} purpose-specific items for '{purpose}'")
+            # Get purpose-specific items - use category if available, otherwise original purpose
+            purpose_for_items = category if category else purpose
+            purpose_items = self._get_purpose_specific_items(purpose_for_items)
+            logger.info(f"Got {len(purpose_items)} purpose-specific items for '{purpose_for_items}'")
             
             # Get duration-specific items
             duration_items = self._get_duration_specific_items(duration)
@@ -210,6 +215,88 @@ class ChecklistGenerator:
                 "Карта местности",
                 "Походная аптечка",
                 "Фонарик"
+            ],
+            "sightseeing": [
+                "Удобная обувь для прогулок",
+                "Фотоаппарат",
+                "Путеводитель",
+                "Карта города/местности",
+                "Рюкзак/сумка для дневных прогулок",
+                "Бутылка для воды"
+            ],
+            "hiking": [
+                "Треккинговая обувь",
+                "Походный рюкзак",
+                "Треккинговые палки",
+                "Термос",
+                "Навигатор/карта",
+                "Походная аптечка",
+                "Фонарик",
+                "Спальный мешок",
+                "Газовая горелка",
+                "Котелок"
+            ],
+            "cruise": [
+                "Купальник/плавки",
+                "Солнцезащитный крем",
+                "Солнцезащитные очки",
+                "Вечерний наряд для ужинов",
+                "Палубная обувь",
+                "Лекарства от морской болезни"
+            ],
+            "cultural": [
+                "Удобная обувь для прогулок",
+                "Фотоаппарат",
+                "Путеводитель",
+                "Блокнот и ручка",
+                "Билеты на мероприятия",
+                "Гид по музеям/выставкам"
+            ],
+            "wellness": [
+                "Спортивная одежда",
+                "Купальник/плавки",
+                "Тапочки",
+                "Халат",
+                "Масло для массажа",
+                "Личные средства для ухода"
+            ],
+            "education": [
+                "Ноутбук",
+                "Учебные материалы",
+                "Блокнот и ручка",
+                "Записная книжка",
+                "Словарь",
+                "USB-накопитель"
+            ],
+            "sports": [
+                "Спортивная одежда",
+                "Спортивная обувь",
+                "Спортивное снаряжение",
+                "Спортивная сумка",
+                "Полотенце",
+                "Спортивное питание/вода"
+            ],
+            "religious": [
+                "Головной убор",
+                "Скромная одежда",
+                "Религиозная атрибутика",
+                "Карта святых мест",
+                "Молитвенник"
+            ],
+            "family": [
+                "Игрушки для детей",
+                "Детская аптечка",
+                "Влажные салфетки",
+                "Детское питание",
+                "Детский солнцезащитный крем",
+                "Семейная аптечка"
+            ],
+            "medical": [
+                "Медицинские документы",
+                "Страховка",
+                "Лекарства",
+                "Контакты врача/клиники",
+                "Медицинская аптечка"
             ],
             "other": [
                 "Удобная обувь для прогулок",

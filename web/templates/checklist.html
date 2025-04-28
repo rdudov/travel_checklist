@@ -118,6 +118,9 @@
             <p><strong>Место назначения:</strong> {{ destination }}</p>
             <p><strong>Длительность:</strong> {{ duration }} дней</p>
             <p><strong>Цель поездки:</strong> {{ purpose }}</p>
+            {% if purpose_category and purpose != purpose_category %}
+            <p><strong>Категория:</strong> {{ purpose_category }}</p>
+            {% endif %}
             {% if weather %}
             <p><strong>Погода:</strong> {{ weather }}</p>
             {% endif %}
