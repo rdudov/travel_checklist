@@ -56,11 +56,11 @@ async def view_checklist(request: Request, checklist_id: int, db: Session = Depe
         for item in checklist.items:
             if item.category not in categories:
                 categories[item.category] = []
-            categories[item.category].append(item.title)
+            categories[item.category].append(item)
         
-        # Sort items in each category
+        # Sort items in each category by order
         for category in categories:
-            categories[category].sort()
+            categories[category].sort(key=lambda x: x.order)
         
         # Calculate total items
         total_items = sum(len(items) for items in categories.values())
@@ -382,6 +382,32 @@ async def share_checklist(checklist_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Error sharing checklist ID {checklist_id}: {str(e)}")
         raise
+
+@app.post("/checklist/{checklist_id}/toggle-item")
+async def toggle_item(checklist_id: int, 
+                     item_id: int = Form(...),
+                     is_completed: bool = Form(...),
+                     db: Session = Depends(get_db)):
+    """Toggle item completion status"""
+    logger.info(f"Toggling item {item_id} in checklist {checklist_id} to {is_completed}")
+    
+    try:
+        # Get the item
+        item = db.query(ChecklistItem).filter_by(id=item_id, checklist_id=checklist_id).first()
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found")
+        
+        # Update the item
+        item.is_completed = is_completed
+        db.commit()
+        
+        logger.info(f"Updated item {item_id} completion status to {is_completed}")
+        
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Error toggling item {item_id} in checklist {checklist_id}: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.on_event("startup")
 async def startup_event():

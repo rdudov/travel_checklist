@@ -132,8 +132,10 @@
             <ul class="checklist">
                 {% for item in items %}
                 <li>
-                    <input type="checkbox" id="item-{{ loop.index }}" name="item-{{ loop.index }}">
-                    <label for="item-{{ loop.index }}">{{ item }}</label>
+                    <input type="checkbox" id="item-{{ item.id }}" name="item-{{ item.id }}" 
+                           {% if item.is_completed %}checked{% endif %}
+                           data-item-id="{{ item.id }}">
+                    <label for="item-{{ item.id }}">{{ item.title }}</label>
                 </li>
                 {% endfor %}
             </ul>
@@ -155,7 +157,31 @@
     <script>
         // Update progress when checkboxes are clicked
         document.querySelectorAll('input[type="checkbox"]').forEach(checkbox => {
-            checkbox.addEventListener('change', updateProgress);
+            checkbox.addEventListener('change', async function() {
+                const itemId = this.dataset.itemId;
+                const isCompleted = this.checked;
+                
+                try {
+                    const response = await fetch(`/checklist/{{ request.path_params.checklist_id }}/toggle-item`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                        },
+                        body: `item_id=${itemId}&is_completed=${isCompleted}`
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error('Network response was not ok');
+                    }
+                    
+                    updateProgress();
+                } catch (error) {
+                    console.error('Error:', error);
+                    // Revert checkbox state on error
+                    this.checked = !isCompleted;
+                    alert('Произошла ошибка при сохранении состояния. Пожалуйста, попробуйте снова.');
+                }
+            });
         });
 
         function updateProgress() {
@@ -163,6 +189,9 @@
             const checked = document.querySelectorAll('input[type="checkbox"]:checked').length;
             document.getElementById('progress-text').textContent = `${checked} из ${total} выполнено`;
         }
+
+        // Initial progress update
+        updateProgress();
 
         function copyToClipboard() {
             let text = `${document.querySelector('h1').textContent}\n\n`;
